@@ -32,7 +32,7 @@
 		"@tldraw/sync-core": "^5.4.1",
 		"@tldraw/tlschema": "^5.4.1",
 		"@tldraw/utils": "5.4.1",
-		"better-sqlite3": "^12.11.1",
+		"better-sqlite3": "^13.0.3",
 		"cloudflare-workers-unfurl": "^0.0.9",
 		"fastify": "^5.12.3",
 		"itty-router": "^5.0.18",
