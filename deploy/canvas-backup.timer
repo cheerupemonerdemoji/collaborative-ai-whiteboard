@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Collaborative AI Canvas backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=300
+# Catch up after the machine has been off; a skipped day is a lost generation.
+Persistent=true
+Unit=canvas-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Collaborative AI Canvas verified backup
+Documentation=file:///home/app/collaborative-ai-canvas/docs/operations/backup-and-restore.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/app/collaborative-ai-canvas
+Environment=CANVAS_DATA_DIR=/home/app/.local/share/collaborative-ai-canvas
+Environment=CANVAS_API_TOKENS_FILE=/home/app/.config/collaborative-ai-canvas/api-tokens.json
+ExecStart=/usr/bin/python3 /home/app/collaborative-ai-canvas/scripts/backup-canvas-data.py run
+# Backups must never compete with live collaboration for IO.
+Nice=10
+IOSchedulingClass=idle

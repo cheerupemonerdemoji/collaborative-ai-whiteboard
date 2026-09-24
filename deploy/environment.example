@@ -1,0 +1,4 @@
+# Optional service overrides. API token hashes are stored separately at
+# /home/app/.config/collaborative-ai-canvas/api-tokens.json.
+CANVAS_ALLOWED_ORIGINS=https://whiteboard.example.com,http://your-server,http://127.0.0.1:8787,http://localhost:8787
+CANVAS_ALLOW_OPEN_REGISTRATION=false

@@ -1,0 +1,25 @@
+[Unit]
+Description=Collaborative AI Canvas
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/app/collaborative-ai-canvas
+EnvironmentFile=/home/app/.config/collaborative-ai-canvas/environment
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+Environment=CANVAS_DATA_DIR=/home/app/.local/share/collaborative-ai-canvas
+Environment=CANVAS_API_TOKENS_FILE=/home/app/.config/collaborative-ai-canvas/api-tokens.json
+ExecStart=/usr/bin/node /home/app/collaborative-ai-canvas/dist/server/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/app/.local/share/collaborative-ai-canvas
+
+[Install]
+WantedBy=default.target

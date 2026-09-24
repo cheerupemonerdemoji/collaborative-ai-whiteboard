@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Tunnel for AI Whiteboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token-file /home/app/.config/cloudflared/whiteboard-site.token
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,25 @@
+/*/node_modules
+node_modules
+.yarn/
+.wrangler/
+dist/
+.dev.vars
+.env
+.env.*
+!.env.example
+data/
+work-data/
+__pycache__/
+*.pyc
+
+# Belt-and-suspenders: none of these have ever been tracked (verified by a full git-history
+# scan, docs/reviews/), but they must never land accidentally either.
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+*.p12
+api-tokens.json
+uploads/
+backups/

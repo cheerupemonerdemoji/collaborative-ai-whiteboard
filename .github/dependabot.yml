@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # This project pins its package manager via corepack; Dependabot respects
+    # the lockfile (pnpm-lock.yaml) and won't switch package managers.
+    open-pull-requests-limit: 10
+    groups:
+      tldraw:
+        patterns:
+          - "@tldraw/*"
+          - "tldraw"
+      dev-dependencies:
+        dependency-type: "development"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
