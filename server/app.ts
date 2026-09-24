@@ -51,6 +51,7 @@ export interface RateLimitOptions {
 	snapshot?: RateLimitSetting
 	invitation?: RateLimitSetting
 	upload?: RateLimitSetting
+	assetRead?: RateLimitSetting
 }
 
 export interface BuildAppOptions {
@@ -74,6 +75,9 @@ const INVITATION_LIMIT = 30
 const INVITATION_WINDOW_MS = 60 * 60_000
 const UPLOAD_LIMIT = 60
 const UPLOAD_WINDOW_MS = 15 * 60_000
+/** Opening a board fetches each visible asset, so reads get far more headroom than uploads. */
+const ASSET_READ_LIMIT = 600
+const ASSET_READ_WINDOW_MS = 60_000
 const AI_EVENT_TYPES = [
 	'ai.requested',
 	'ai.suggestion_generated',
@@ -219,6 +223,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	const snapshotLimiter = limiterFor(options.rateLimits?.snapshot, SNAPSHOT_LIMIT, SNAPSHOT_WINDOW_MS)
 	const invitationLimiter = limiterFor(options.rateLimits?.invitation, INVITATION_LIMIT, INVITATION_WINDOW_MS)
 	const uploadLimiter = limiterFor(options.rateLimits?.upload, UPLOAD_LIMIT, UPLOAD_WINDOW_MS)
+	const assetReadLimiter = limiterFor(options.rateLimits?.assetRead, ASSET_READ_LIMIT, ASSET_READ_WINDOW_MS)
 	const allowed = allowedOrigins(process.env.CANVAS_ALLOWED_ORIGINS)
 	configureRoomAuditReader((boardId, after) => authService.database.listBoardEventsSince(boardId, after).map((event) => ({
 		...event,
@@ -737,6 +742,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			return reply.code(400).send({ error: 'Invalid asset ID' })
 		}
 		if (!authService.getBoardRole(session.user.id, params.boardId, false)) return reply.code(404).send({ error: 'Not found' })
+		if (!assetReadLimiter.allow(`user:${session.user.id}:${params.boardId}`)) return tooManyRequests(reply, 'asset reads')
 		if (!authService.database.canReadAsset(session.user.id, params.uploadId)) return reply.code(404).send({ error: 'Not found' })
 		const path = join(assetDirectory, params.uploadId)
 		if (!existsSync(path)) return reply.code(404).send({ error: 'Not found' })

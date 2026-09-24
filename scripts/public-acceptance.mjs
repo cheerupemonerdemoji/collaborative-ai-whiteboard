@@ -33,6 +33,7 @@ import { writeFileSync } from 'node:fs'
 import { getTlsyncProtocolVersion } from '@tldraw/sync-core'
 import { createTLSchema } from '@tldraw/tlschema'
 import WebSocket from 'ws'
+import { hostIsOrIsUnder } from './host-match.mjs'
 
 const BASE = process.env.ACCEPTANCE_BASE ?? 'https://whiteboard.example.com'
 const ORIGIN = BASE
@@ -238,9 +239,9 @@ async function phaseEdge() {
 	for (const [id, path] of [['A1', '/'], ['A2', '/api/health'], ['A3', '/api/boards'], ['A4', '/api/auth/me']]) {
 		await check(id, 'edge', 'edge', `anonymous GET ${path} is stopped by Cloudflare Access`, async () => {
 			const response = await anon.get(path)
-			const host = response.location ? new URL(response.location).host : ''
+			const host = response.location ? new URL(response.location).hostname : ''
 			expect(
-				response.status === 302 && host.endsWith('cloudflareaccess.com'),
+				response.status === 302 && hostIsOrIsUnder(host, 'cloudflareaccess.com'),
 				`status=${response.status} redirect-host=${host || '(none)'}`
 			)
 		})

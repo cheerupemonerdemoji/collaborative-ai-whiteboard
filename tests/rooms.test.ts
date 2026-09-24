@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -97,4 +97,24 @@ describe('closing a room quiesces its scheduled storage maintenance', () => {
 		expect(ids).toContain('shape:lifecycle-kept')
 		expect(ids).not.toContain('shape:lifecycle-dropped')
 	}, 20_000)
+})
+
+describe('the room database path is only built from a validated ID', () => {
+	let directory = ''
+
+	afterEach(() => {
+		closeAllRooms()
+		rmSync(directory, { recursive: true, force: true })
+	})
+
+	it('getRoomHandle refuses hostile IDs before touching the filesystem', () => {
+		directory = mkdtempSync(join(tmpdir(), 'canvas-room-path-'))
+		configureRoomDataDirectory(directory)
+		const hostile = ['../escape', '..\escape', 'a/b', 'a\b', 'room.sqlite', '.', '..', '', 'a b', 'a\0b', 'x'.repeat(81)]
+		for (const id of hostile) expect(() => getRoomHandle(id), JSON.stringify(id)).toThrow('Invalid room ID')
+		expect(readdirSync(join(directory, 'rooms'))).toEqual([])
+		expect(existsSync(join(directory, 'escape.sqlite'))).toBe(false)
+		expect(getRoomHandle('valid-room_1').boardId).toBe('valid-room_1')
+		expect(readdirSync(join(directory, 'rooms')).some((name) => name.startsWith('valid-room_1.sqlite'))).toBe(true)
+	})
 })

@@ -105,6 +105,7 @@ each path has its own window so exhausting one does not disable another:
 | `POST /api/boards/:id/restore` (history) | 20 / 5 min | actor + board |
 | `POST /api/invitations` | 30 / hour | user |
 | `POST /api/boards/:id/uploads/:name` | 60 / 15 min | user + board |
+| `GET /api/boards/:id/assets/:name` | 600 / min | user + board |
 
 Exceeding a budget returns HTTP 429 with a generic message. Checkpoint and restore copy a
 whole board snapshot, so they are deliberately tighter than ordinary canvas writes. The

@@ -17,7 +17,7 @@ This file records user-facing changes to the application. Git remains the author
 - Machine bearer-token permissions extended to `read`, `write`, `history`, and `restore`, with new `read-history` and `full` access modes in the token management script.
 - Explicit application-owned SQLite migrations (central `auth.sqlite` and per-board history) and architecture decision records.
 - Board-scoped authenticated URLs for uploaded assets.
-- Per-actor rate limits on canvas actions, AI lifecycle events, checkpoints, history restores, invitation creation, and asset uploads, with independent budgets per path and a `rateLimits` build option for operators.
+- Per-actor rate limits on canvas actions, AI lifecycle events, checkpoints, history restores, invitation creation, asset uploads, and authenticated asset reads, with independent budgets per path and a `rateLimits` build option for operators.
 - A first Chibi Robo semantic layer: eight closed engineering entity types (component, interface, requirement, task, experiment, decision, risk, evidence) stored as a `engineering_entity` tldraw record, bounded one-hop relationships, seven semantic AI actions, a compact filtered `GET /api/rooms/:roomId/semantic-context` read endpoint with hard read/write budgets, and `entity.created`/`entity.updated`/`entity.deleted` history event types. Rides the existing sync/checkpoint/restore/authorization/rate-limiting machinery; no second persistence or history subsystem. See `docs/chibi-robo/whiteboard-integration-plan.md`.
 
 ### Changed
