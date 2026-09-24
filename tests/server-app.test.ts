@@ -589,3 +589,107 @@ describe('write-path rate limiting', () => {
 		expect((await act(bearer(token), 'shape:machine-blocked')).statusCode).toBe(429)
 	})
 })
+
+describe('asset read rate limiting', () => {
+	async function galleryApp(rateLimits?: BuildAppOptions['rateLimits']) {
+		const { app } = await createApp(() => {}, rateLimits)
+		const owner = await registerOwner(app)
+		expect((await app.inject({ method: 'POST', url: '/api/boards', headers: { cookie: owner.cookie }, payload: { name: 'Gallery', id: 'gallery' } })).statusCode).toBe(200)
+		const upload = await app.inject({
+			method: 'POST',
+			url: '/api/boards/gallery/uploads/photo.bin',
+			headers: { cookie: owner.cookie, 'content-type': 'application/octet-stream' },
+			payload: Buffer.from('asset-bytes'),
+		})
+		expect(upload.statusCode).toBe(200)
+		const join = async (login: string, role: 'viewer' | 'editor' | null) => {
+			const invite = await app.inject({ method: 'POST', url: '/api/invitations', headers: { cookie: owner.cookie }, payload: {} })
+			const registered = await app.inject({
+				method: 'POST',
+				url: '/api/auth/register',
+				payload: { login, displayName: login, password: 'another secure password', invitationToken: invite.json().token },
+			})
+			expect(registered.statusCode).toBe(200)
+			if (role) {
+				const assigned = await app.inject({
+					method: 'PUT',
+					url: `/api/boards/gallery/members/${registered.json().user.id}`,
+					headers: { cookie: owner.cookie },
+					payload: { role },
+				})
+				expect(assigned.statusCode).toBe(200)
+			}
+			return `canvas_session=${registered.cookies[0].value}`
+		}
+		const read = (cookie: string | null, id = 'photo.bin', extra: { headers?: Record<string, string>; query?: string } = {}) => app.inject({
+			method: 'GET',
+			url: `/api/boards/gallery/assets/${id}${extra.query ?? ''}`,
+			headers: { ...(cookie ? { cookie } : {}), ...(extra.headers ?? {}) },
+		})
+		return { app, owner, join, read }
+	}
+
+	it('serves authorized reads normally under the default budget', async () => {
+		const { owner, join, read } = await galleryApp()
+		const viewer = await join('viewer-user', 'viewer')
+		for (let index = 0; index < 5; index++) {
+			const ownerRead = await read(owner.cookie)
+			expect(ownerRead.statusCode).toBe(200)
+			expect(ownerRead.body).toBe('asset-bytes')
+		}
+		expect((await read(viewer)).statusCode).toBe(200)
+	})
+
+	it('throttles repeated reads per user and board, with the same 429 style as other paths', async () => {
+		const { app, owner, join, read } = await galleryApp({ assetRead: { limit: 3, windowMs: 60_000 } })
+		const viewer = await join('viewer-user', 'viewer')
+		for (let index = 0; index < 3; index++) expect((await read(owner.cookie)).statusCode).toBe(200)
+		const throttled = await read(owner.cookie)
+		expect(throttled.statusCode).toBe(429)
+		expect(throttled.json().error).toMatch(/Too many asset reads/)
+
+		// The budget is per user: another member is unaffected by the owner's spent budget.
+		expect((await read(viewer)).statusCode).toBe(200)
+		// Probing an asset id that does not exist spends the same budget and is throttled too,
+		// so the limit cannot be sidestepped by asking for something the server will 404.
+		expect((await read(owner.cookie, 'missing.bin')).statusCode).toBe(429)
+		// A spent read budget does not consume the canvas-write budget.
+		const write = await app.inject({
+			method: 'POST',
+			url: '/api/rooms/gallery/actions',
+			headers: { cookie: owner.cookie },
+			payload: { actions: [{ tool: 'create_text', id: 'shape:still-writable', text: 'note', x: 1, y: 1 }] },
+		})
+		expect(write.statusCode).toBe(200)
+	})
+
+	it('keeps denying anonymous and nonmember callers, and never lets them spend or see a budget', async () => {
+		const { owner, join, read } = await galleryApp({ assetRead: { limit: 2, windowMs: 60_000 } })
+		const outsider = await join('outsider-user', null)
+		expect((await read(null)).statusCode).toBe(401)
+		for (let index = 0; index < 6; index++) {
+			const denied = await read(outsider)
+			expect(denied.statusCode).toBe(404)
+		}
+		// Malformed ids are rejected before any budget is consulted.
+		expect((await read(owner.cookie, 'a..b')).statusCode).toBe(400)
+		// Those denied attempts did not touch the member's budget.
+		expect((await read(owner.cookie)).statusCode).toBe(200)
+		expect((await read(owner.cookie)).statusCode).toBe(200)
+		expect((await read(owner.cookie)).statusCode).toBe(429)
+	})
+
+	it('is enforced server-side: request headers, query strings and cache hints do not reset it', async () => {
+		const { owner, read } = await galleryApp({ assetRead: { limit: 1, windowMs: 60_000 } })
+		expect((await read(owner.cookie)).statusCode).toBe(200)
+		const attempts = [
+			{ headers: { 'x-forwarded-for': '198.51.100.7' } },
+			{ headers: { 'x-forwarded-for': '203.0.113.9', 'x-real-ip': '203.0.113.9' } },
+			{ headers: { 'cache-control': 'no-cache', pragma: 'no-cache' } },
+			{ headers: { origin: 'http://127.0.0.1:8787', 'user-agent': 'different-client/1.0' } },
+			{ query: '?bust=1' },
+			{ query: '?bust=2&limit=0' },
+		]
+		for (const attempt of attempts) expect((await read(owner.cookie, 'photo.bin', attempt)).statusCode).toBe(429)
+	})
+})
