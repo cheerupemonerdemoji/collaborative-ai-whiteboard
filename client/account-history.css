@@ -50,7 +50,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .aw-role-owner { background: #ede9fe; color: #6d28d9; }.aw-role-editor { background: #dbeafe; color: #1d4ed8; }.aw-role-viewer { background: #f1f5f9; color: #475569; }
 .aw-empty-card { min-height: 280px; display: grid; place-items: center; align-content: center; gap: 8px; padding: 30px; border: 1px dashed #cbd5e1; border-radius: 16px; background: white; color: #64748b; text-align: center; }
 .aw-empty-card h2, .aw-empty-card p { margin: 0; }.aw-empty-icon { font-size: 28px; color: #6366f1; }
-.aw-history-panel { position: fixed; z-index: 30; top: 54px; right: 0; bottom: 0; width: min(390px, 100vw); display: flex; flex-direction: column; background: #fff; border-left: 1px solid #dce2ec; box-shadow: -12px 0 36px rgba(15,23,42,.12); color: #172033; }
+.aw-history-panel { position: fixed; z-index: 400; top: 54px; right: 0; bottom: 0; width: min(390px, 100vw); display: flex; flex-direction: column; background: #fff; border-left: 1px solid #dce2ec; box-shadow: -12px 0 36px rgba(15,23,42,.12); color: #172033; }
 .aw-history-header { display: flex; justify-content: space-between; gap: 12px; padding: 18px; border-bottom: 1px solid #e2e8f0; }
 .aw-history-header h2 { margin: 0; font-size: 21px; }.aw-history-header p { margin: 4px 0 0; color: #64748b; font-size: 12px; }.aw-icon-button { border: 0; font-size: 23px; line-height: 1; }
 .aw-history-actions { padding: 10px 14px 0; text-align: right; }.aw-history-actions button { color: #4338ca; font-weight: 650; }

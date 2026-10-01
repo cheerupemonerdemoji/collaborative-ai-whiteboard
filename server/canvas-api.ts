@@ -116,7 +116,26 @@ function byteSize(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value), 'utf8')
 }
 
-function applyCreateEntity(txn: { get(id: string): TLRecord | undefined; set(id: string, record: TLRecord): void }, entityCount: { current: number }, action: Extract<SemanticAction, { tool: 'create_entity' }>, actor: SemanticActor, now: number): EngineeringEntity {
+/**
+ * The only place `reference` stops being a fully opaque label: for `kind: 'table'` it must name a
+ * structured-table artifact registered to *this* board (the board the action is being applied
+ * to), even if the acting user also legitimately belongs to the board that really owns it - see
+ * docs/reviews/2026-10-01-cross-board-asset-isolation-root-cause.md. `isAssetInBoard` is omitted
+ * (not merely false) wherever board/DB context genuinely isn't available, e.g. the low-level
+ * tests in tests/chibi-semantics.test.ts that construct a room directly with no board at all; the
+ * real HTTP route (server/app.ts) always provides it, and that is where this property is actually
+ * proven under test (tests/evidence-tables.test.ts's cross-board isolation suite). 404, not 403,
+ * matches this app's existing choice to never reveal a board-scoped resource's existence to a
+ * request that isn't authorized to see it.
+ */
+function assertTableReferenceInBoard(candidate: { entityType?: string; kind?: unknown; reference?: unknown }, isAssetInBoard: ((uploadId: string) => boolean) | undefined): void {
+	if (!isAssetInBoard) return
+	if (candidate.entityType !== 'evidence' || candidate.kind !== 'table') return
+	if (typeof candidate.reference !== 'string') return
+	if (!isAssetInBoard(candidate.reference)) throw new CanvasApiError('Unknown entity: referenced table artifact not found on this board', 404)
+}
+
+function applyCreateEntity(txn: { get(id: string): TLRecord | undefined; set(id: string, record: TLRecord): void }, entityCount: { current: number }, action: Extract<SemanticAction, { tool: 'create_entity' }>, actor: SemanticActor, now: number, isAssetInBoard?: (uploadId: string) => boolean): EngineeringEntity {
 	if (txn.get(action.id)) throw new CanvasApiError(`Entity ID already exists: ${action.id}`, 409)
 	if (entityCount.current >= SEMANTIC_WRITE_LIMITS.maxEntitiesPerBoard) throw new CanvasApiError('This board has reached its engineering-entity limit', 422)
 	const candidate = {
@@ -132,7 +151,9 @@ function applyCreateEntity(txn: { get(id: string): TLRecord | undefined; set(id:
 		createdAt: now,
 		updatedAt: now,
 		...(action.fields ?? {}),
+		...(action.tableSummary ? { tableSummary: action.tableSummary } : {}),
 	}
+	assertTableReferenceInBoard(candidate, isAssetInBoard)
 	const validated = engineeringEntitySchema.parse(candidate)
 	if (byteSize(validated) > SEMANTIC_WRITE_LIMITS.maxEntityBytes) throw new CanvasApiError('Entity exceeds the per-record size limit', 422)
 	txn.set(validated.id, validated as unknown as TLRecord)
@@ -146,7 +167,7 @@ function findEntity(txn: { get(id: string): TLRecord | undefined }, id: string):
 	return existing as unknown as EngineeringEntity
 }
 
-function applyUpdateEntity(txn: { get(id: string): TLRecord | undefined; set(id: string, record: TLRecord): void }, id: string, patch: { title?: string; status?: string; shapeId?: string | null; fields?: Record<string, unknown> }, actor: SemanticActor, now: number): EngineeringEntity {
+function applyUpdateEntity(txn: { get(id: string): TLRecord | undefined; set(id: string, record: TLRecord): void }, id: string, patch: { title?: string; status?: string; shapeId?: string | null; fields?: Record<string, unknown>; tableSummary?: { rows: number; columns: string[] } }, actor: SemanticActor, now: number, isAssetInBoard?: (uploadId: string) => boolean): EngineeringEntity {
 	const existing = findEntity(txn, id)
 	const candidate = {
 		...existing,
@@ -154,9 +175,11 @@ function applyUpdateEntity(txn: { get(id: string): TLRecord | undefined; set(id:
 		...(patch.status !== undefined ? { status: patch.status } : {}),
 		...(patch.shapeId !== undefined ? { shapeId: patch.shapeId ?? undefined } : {}),
 		...(patch.fields ?? {}),
+		...(patch.tableSummary !== undefined ? { tableSummary: patch.tableSummary } : {}),
 		updatedBy: actor.actorUserId,
 		updatedAt: now,
 	}
+	assertTableReferenceInBoard(candidate, isAssetInBoard)
 	const validated = engineeringEntitySchema.parse(candidate)
 	if (byteSize(validated) > SEMANTIC_WRITE_LIMITS.maxEntityBytes) throw new CanvasApiError('Entity exceeds the per-record size limit', 422)
 	txn.set(validated.id, validated as unknown as TLRecord)
@@ -183,14 +206,14 @@ function applyUnlinkEntities(txn: { get(id: string): TLRecord | undefined; set(i
 	return validated
 }
 
-function applySemanticAction(txn: { get(id: string): TLRecord | undefined; set(id: string, record: TLRecord): void }, entityCount: { current: number }, action: SemanticAction, actor: SemanticActor, now: number): void {
+function applySemanticAction(txn: { get(id: string): TLRecord | undefined; set(id: string, record: TLRecord): void }, entityCount: { current: number }, action: SemanticAction, actor: SemanticActor, now: number, isAssetInBoard?: (uploadId: string) => boolean): void {
 	switch (action.tool) {
-		case 'create_entity': applyCreateEntity(txn, entityCount, action, actor, now); return
-		case 'update_entity': applyUpdateEntity(txn, action.id, { title: action.title, status: action.status, shapeId: action.shapeId, fields: action.fields }, actor, now); return
+		case 'create_entity': applyCreateEntity(txn, entityCount, action, actor, now, isAssetInBoard); return
+		case 'update_entity': applyUpdateEntity(txn, action.id, { title: action.title, status: action.status, shapeId: action.shapeId, fields: action.fields, tableSummary: action.tableSummary }, actor, now, isAssetInBoard); return
 		case 'link_entities': applyLinkEntities(txn, action.id, action.relationType, action.targetId, actor, now); return
 		case 'unlink_entities': applyUnlinkEntities(txn, action.id, action.relationType, action.targetId, actor, now); return
 		case 'record_experiment_result':
-			applyUpdateEntity(txn, action.id, { status: action.status, fields: { result: action.result } }, actor, now)
+			applyUpdateEntity(txn, action.id, { status: action.status, fields: { result: action.result } }, actor, now, isAssetInBoard)
 			return
 		case 'attach_evidence': {
 			const evidence = findEntity(txn, action.evidenceId)
@@ -198,7 +221,7 @@ function applySemanticAction(txn: { get(id: string): TLRecord | undefined; set(i
 			applyLinkEntities(txn, action.id, 'supported_by', action.evidenceId, actor, now)
 			return
 		}
-		case 'update_status': applyUpdateEntity(txn, action.id, { status: action.status }, actor, now); return
+		case 'update_status': applyUpdateEntity(txn, action.id, { status: action.status }, actor, now, isAssetInBoard); return
 	}
 }
 
@@ -237,7 +260,7 @@ export function readRoomSemantics<SessionMeta>(room: TLSocketRoom<TLRecord, Sess
 	return payload
 }
 
-export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, raw: unknown, actor: SemanticActor) {
+export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, raw: unknown, actor: SemanticActor, isAssetInBoard?: (uploadId: string) => boolean) {
 	const request = actionRequestSchema.parse(raw)
 	const { result, documentClock } = room.storage.transaction((txn) => {
 		if (request.expectedClock !== undefined && txn.getClock() !== request.expectedClock) throw new CanvasApiError('Canvas changed; read it again and retry', 409)
@@ -249,7 +272,7 @@ export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, Sessi
 		const entityCount = { current: entities(items).length }
 		const now = Date.now()
 		for (const action of request.actions) {
-			if (isSemanticAction(action)) { applySemanticAction(txn, entityCount, action, actor, now); continue }
+			if (isSemanticAction(action)) { applySemanticAction(txn, entityCount, action, actor, now, isAssetInBoard); continue }
 			if (action.tool === 'create_shape' || action.tool === 'create_text' || action.tool === 'create_arrow' || action.tool === 'connect_shapes') {
 				if (txn.get(action.id)) throw new CanvasApiError(`Object ID already exists: ${action.id}`, 409)
 				topIndex = getIndexAbove(topIndex)
