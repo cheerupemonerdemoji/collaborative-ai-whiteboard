@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -36,6 +37,7 @@ import {
 	SlidingWindowRateLimiter,
 } from './security'
 import { authorizeApiToken, type ApiPermission } from './tokens'
+import { evidenceTableArtifactId, EVIDENCE_TABLE_LIMITS, evidenceTableSchema, summaryForTable } from '../shared/evidence-tables'
 import type { HistoryEvent, HistoryEventFilters, HistorySource, HistoryEventType } from '../shared/history'
 
 export interface RateLimitSetting {
@@ -582,7 +584,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			sessionId: null,
 			source: access.kind === 'token' ? 'ai' : 'human',
 			immediate: true,
-		}, () => applyRoomActions(handle.room, request.body, actor))
+		}, () => applyRoomActions(handle.room, request.body, actor, (uploadId) => authService.database.assetBelongsToBoard(uploadId, roomId)))
 		reply.header('Cache-Control', 'no-store')
 		return { roomId, ...result }
 	})
@@ -734,6 +736,46 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		return { ok: true }
 	})
 
+	/**
+	 * Creates one immutable, structurally-validated table artifact for Evidence.kind === 'table'
+	 * (shared/evidence-tables.ts). Authorization mirrors the uploads route above exactly (session,
+	 * board write role, the same upload rate limiter). Storage reuses the same write-once
+	 * primitives (assetDirectory + registerBoardAsset) as every other asset kind - the only thing
+	 * genuinely new here is server-side structural validation before those bytes are written, which
+	 * the generic uploads route intentionally does not do for any asset kind. See
+	 * docs/development/structured-evidence-design.md for the full design and DeepSeek disposition,
+	 * including why a per-board artifact-count cap exists here specifically.
+	 */
+	app.post('/api/boards/:boardId/evidence-tables', async (request, reply) => {
+		const session = currentSession(request)
+		if (!session) return reply.code(401).send({ error: 'Authentication required' })
+		const params = request.params as { boardId: string }
+		const role = authService.getBoardRole(session.user.id, params.boardId, false)
+		if (!role) return reply.code(404).send({ error: 'Board not found' })
+		if (!userRoleHasWrite(role)) return reply.code(403).send({ error: 'You do not have permission to upload to this board' })
+		if (!uploadLimiter.allow(`user:${session.user.id}:${params.boardId}`)) return tooManyRequests(reply, 'uploads')
+		const table = evidenceTableSchema.parse(request.body)
+		const serialized = JSON.stringify(table)
+		if (Buffer.byteLength(serialized, 'utf8') > EVIDENCE_TABLE_LIMITS.maxSerializedBytes) {
+			throw new HttpError(422, 'Table artifact exceeds the serialized size limit')
+		}
+		const uploadId = evidenceTableArtifactId(randomUUID())
+		const path = join(assetDirectory, uploadId)
+		await import('node:fs/promises').then(({ writeFile }) => writeFile(path, serialized, { flag: 'wx' }))
+		// The count check and the registration happen in one DB transaction (see
+		// registerBoardAssetIfUnderCap) so two concurrent requests for the same board cannot both
+		// pass the cap before either registers. The file write above happens first and is cheap
+		// (content-addressed by a fresh UUID, never collides); on a rejected cap check the orphan
+		// file is removed rather than left behind.
+		const registered = authService.database.registerBoardAssetIfUnderCap(params.boardId, uploadId, 'evidence-table-', EVIDENCE_TABLE_LIMITS.maxTableArtifactsPerBoard)
+		if (!registered) {
+			await import('node:fs/promises').then(({ unlink }) => unlink(path)).catch(() => {})
+			throw new HttpError(422, 'This board has reached its structured-evidence artifact limit')
+		}
+		reply.code(201)
+		return { uploadId, summary: summaryForTable(table) }
+	})
+
 	app.get('/api/boards/:boardId/assets/:uploadId', async (request, reply) => {
 		const session = currentSession(request)
 		if (!session) return reply.code(401).send({ error: 'Authentication required' })
@@ -743,7 +785,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		}
 		if (!authService.getBoardRole(session.user.id, params.boardId, false)) return reply.code(404).send({ error: 'Not found' })
 		if (!assetReadLimiter.allow(`user:${session.user.id}:${params.boardId}`)) return tooManyRequests(reply, 'asset reads')
-		if (!authService.database.canReadAsset(session.user.id, params.uploadId)) return reply.code(404).send({ error: 'Not found' })
+		if (!authService.database.canReadAsset(session.user.id, params.boardId, params.uploadId)) return reply.code(404).send({ error: 'Not found' })
 		const path = join(assetDirectory, params.uploadId)
 		if (!existsSync(path)) return reply.code(404).send({ error: 'Not found' })
 		reply.header('Content-Security-Policy', "default-src 'none'").header('X-Content-Type-Options', 'nosniff')

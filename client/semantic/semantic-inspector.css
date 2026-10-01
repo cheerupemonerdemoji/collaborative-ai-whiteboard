@@ -1,0 +1,55 @@
+.aw-inspector-panel { width: min(420px, 100vw); }
+.aw-inspector-error { margin: 0; padding: 10px 14px; color: #b91c1c; background: #fef2f2; border-bottom: 1px solid #fecaca; font-size: 12.5px; }
+.aw-inspector-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #e2e8f0; }
+.aw-inspector-filters label, .aw-inspector-form label, .aw-inspector-relation-form label { display: grid; gap: 4px; color: #64748b; font-size: 11px; font-weight: 700; }
+.aw-inspector-filters select { min-height: 35px; padding: 5px 7px; font-size: 12px; }
+.aw-inspector-body { flex: 1; overflow-y: auto; }
+.aw-inspector-empty { padding: 18px; color: #475569; font-size: 13px; line-height: 1.5; }
+.aw-inspector-empty-inline { padding: 4px 0; color: #94a3b8; font-size: 12.5px; }
+.aw-inspector-list section { padding: 6px 0; border-bottom: 1px solid #eef1f6; }
+.aw-inspector-list h4 { margin: 6px 14px; color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.aw-inspector-row { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 9px 14px; border: 0; border-radius: 0; background: transparent; text-align: left; font: inherit; color: #172033; cursor: pointer; }
+.aw-inspector-row:hover { background: #f8fafc; }
+.aw-inspector-row-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.aw-inspector-status { flex: none; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.aw-inspector-status-done, .aw-inspector-status-completed, .aw-inspector-status-decided, .aw-inspector-status-satisfied, .aw-inspector-status-approved, .aw-inspector-status-active { background: #ecfdf5; color: #047857; }
+.aw-inspector-status-archived, .aw-inspector-status-deprecated { background: #f1f5f9; color: #64748b; }
+.aw-inspector-status-blocked, .aw-inspector-status-violated { background: #fef2f2; color: #b91c1c; }
+.aw-inspector-detail { padding: 14px; }
+.aw-inspector-back { border: 0; padding: 0; margin-bottom: 10px; color: #4338ca; font-size: 12.5px; font-weight: 650; background: transparent; }
+.aw-inspector-detail h3 { margin: 0 0 4px; font-size: 17px; }
+.aw-inspector-meta { margin: 0 0 12px; color: #64748b; font-size: 12px; }
+.aw-inspector-meta code { color: #94a3b8; font-size: 11px; }
+.aw-inspector-fields { display: grid; gap: 10px; margin: 0 0 14px; }
+.aw-inspector-fields dt { color: #64748b; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.aw-inspector-fields dd { margin: 2px 0 0; color: #334155; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+.aw-inspector-detail > h4 { margin: 16px 0 8px; font-size: 13px; color: #334155; }
+.aw-inspector-relations { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; }
+.aw-inspector-relations li { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 12.5px; }
+.aw-inspector-relations li span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aw-inspector-rel-type { flex: none; padding: 2px 7px; border-radius: 999px; background: #f1f5f9; color: #475569; font-size: 10.5px; font-weight: 700; }
+.aw-inspector-relations .aw-icon-button { font-size: 16px; color: #94a3b8; }
+.aw-inspector-form, .aw-inspector-relation-form { display: grid; gap: 10px; margin: 10px 14px; padding: 14px; border: 1px solid #c7d2fe; border-radius: 10px; background: #f8faff; }
+.aw-inspector-form h3 { margin: 0; font-size: 14px; }
+.aw-inspector-form input, .aw-inspector-form select, .aw-inspector-form textarea,
+.aw-inspector-relation-form select { width: 100%; border: 1px solid #cbd5e1; border-radius: 9px; padding: 8px 10px; background: white; color: #172033; font: inherit; outline: none; resize: vertical; }
+.aw-inspector-form input:focus, .aw-inspector-form select:focus, .aw-inspector-form textarea:focus,
+.aw-inspector-relation-form select:focus { border-color: #6366f1; box-shadow: 0 0 0 3px #e0e7ff; }
+.aw-inspector-table-editor { display: grid; gap: 8px; padding: 10px; border: 1px dashed #c7d2fe; border-radius: 8px; background: white; }
+.aw-inspector-table-editor textarea { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 11.5px; }
+.aw-inspector-table-editor > div { justify-content: flex-start; }
+.aw-inspector-table-warning { margin: 0; color: #b45309; font-size: 11.5px; }
+.aw-inspector-table-ready { margin: 0; color: #047857; font-size: 12px; font-weight: 650; }
+.aw-inspector-table-section { margin: 14px 0; padding: 10px 0; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; }
+.aw-inspector-table-section h4 { margin: 0 0 4px; }
+.aw-inspector-table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 12px; }
+.aw-inspector-table th, .aw-inspector-table td { padding: 5px 8px; border: 1px solid #e2e8f0; text-align: left; white-space: nowrap; }
+.aw-inspector-table th { background: #f8fafc; color: #475569; font-weight: 700; }
+.aw-inspector-table tbody tr:nth-child(even) { background: #fafbfc; }
+.aw-inspector-id-row { display: flex; align-items: center; gap: 6px; }
+.aw-inspector-id-row code { flex: none; color: #94a3b8; font-size: 12px; }
+.aw-inspector-form > div, .aw-inspector-relation-form > div { display: flex; justify-content: flex-end; gap: 7px; }
+
+@media (max-width: 640px) {
+	.aw-inspector-panel { top: auto; left: 0; bottom: 0; width: 100%; max-height: min(80vh, 640px); border-top: 1px solid #dce2ec; border-left: 0; box-shadow: 0 -12px 36px rgba(15,23,42,.14); }
+}

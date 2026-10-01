@@ -630,12 +630,59 @@ export class AuthDatabase {
 		this.database.prepare('INSERT OR IGNORE INTO board_assets(upload_id, board_id) VALUES (?, ?)').run(uploadId, boardId)
 	}
 
-	canReadAsset(userId: string, uploadId: string): boolean {
+	/** Used only by the evidence-tables artifact-count cap (server/app.ts) - a cheap, proportionate
+	 * growth guard on that one creation route, not a general asset quota. */
+	countBoardAssetsWithPrefix(boardId: string, prefix: string): number {
+		const row = this.database
+			.prepare("SELECT COUNT(*) AS count FROM board_assets WHERE board_id = ? AND upload_id LIKE ? ESCAPE '\\'")
+			.get(boardId, `${prefix.replace(/[\\%_]/g, '\\$&')}%`) as { count: number }
+		return row.count
+	}
+
+	/**
+	 * Atomically checks the same board+prefix count `countBoardAssetsWithPrefix` reports and, only
+	 * if still under `maxCount`, registers the asset - both inside one `better-sqlite3` transaction,
+	 * so two concurrent requests for the same board cannot both pass the check before either
+	 * registers (the TOCTOU race a diff review correctly flagged when the check and the insert were
+	 * two separate statements). Returns false without registering if the board is already at the cap.
+	 */
+	registerBoardAssetIfUnderCap(boardId: string, uploadId: string, prefix: string, maxCount: number): boolean {
+		const attempt = this.database.transaction(() => {
+			if (this.countBoardAssetsWithPrefix(boardId, prefix) >= maxCount) return false
+			this.database.prepare('INSERT OR IGNORE INTO board_assets(upload_id, board_id) VALUES (?, ?)').run(uploadId, boardId)
+			return true
+		})
+		return attempt()
+	}
+
+	/**
+	 * `boardId` must be the board the request is actually scoped to (the route's own `:boardId`),
+	 * not merely some board the asset happens to belong to - that was the cross-board isolation
+	 * defect (2026-10-01): a user who legitimately belongs to two boards could read Board A's
+	 * asset through Board B's route, because the query asked "is this asset owned by *some* board
+	 * this user is a member of" instead of "is it owned by *this* board, which the user is a
+	 * member of." See docs/reviews/2026-10-01-cross-board-asset-isolation-root-cause.md.
+	 */
+	canReadAsset(userId: string, boardId: string, uploadId: string): boolean {
 		return Boolean(this.database.prepare(`
 			SELECT 1 FROM board_assets a
 			JOIN board_members m ON m.board_id = a.board_id
 			JOIN boards b ON b.id = a.board_id
-			WHERE a.upload_id = ? AND m.user_id = ? AND b.deleted_at IS NULL LIMIT 1
-		`).get(uploadId, userId))
+			WHERE a.upload_id = ? AND a.board_id = ? AND m.user_id = ? AND b.deleted_at IS NULL LIMIT 1
+		`).get(uploadId, boardId, userId))
+	}
+
+	/** Board-scoped existence check only (no user/membership involved) - used by the semantic
+	 * action path to verify an Evidence `kind: 'table'` reference belongs to the acting board
+	 * before accepting it, independent of the read-path RBAC check above. The acting board is
+	 * already confirmed non-deleted upstream by `getBoardRole`'s default `includeDeleted=false`
+	 * before a caller can reach this check, so the `deleted_at` filter here is defense-in-depth
+	 * (kept consistent with `canReadAsset` above) rather than closing a reachable gap. */
+	assetBelongsToBoard(uploadId: string, boardId: string): boolean {
+		return Boolean(this.database.prepare(`
+			SELECT 1 FROM board_assets a
+			JOIN boards b ON b.id = a.board_id
+			WHERE a.upload_id = ? AND a.board_id = ? AND b.deleted_at IS NULL LIMIT 1
+		`).get(uploadId, boardId))
 	}
 }

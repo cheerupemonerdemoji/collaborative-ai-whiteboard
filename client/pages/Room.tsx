@@ -2,11 +2,13 @@ import { useSync } from '@tldraw/sync'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { type Editor, Tldraw } from 'tldraw'
+import { syncSchema } from '../../shared/schema'
 import { apiRequest, useAuth } from '../auth'
 import { copyText, SharingPanel } from '../SharingPanel'
 import { getBookmarkPreview } from '../getBookmarkPreview'
 import { HistoryPanel } from '../history/HistoryPanel'
 import { createMultiplayerAssetStore } from '../multiplayerAssetStore'
+import { SemanticInspectorPanel } from '../semantic/SemanticInspectorPanel'
 import { type BoardSummary } from './Dashboard'
 import '../account-history.css'
 
@@ -38,13 +40,14 @@ export function Room() {
 	const [board, setBoard] = useState<BoardSummary | null>(null)
 	const [boardError, setBoardError] = useState<string | null>(null)
 	const [historyOpen, setHistoryOpen] = useState(false)
+	const [inspectorOpen, setInspectorOpen] = useState(false)
 	const [presenting, setPresenting] = useState(false)
 	const [shareOpen, setShareOpen] = useState(false)
 	const [linkCopied, setLinkCopied] = useState(false)
 	const editorRef = useRef<Editor | null>(null)
 
 	const assets = useMemo(() => createMultiplayerAssetStore(roomId), [roomId])
-	const store = useSync({ uri: `${window.location.origin}/api/connect/${roomId}`, assets })
+	const store = useSync({ uri: `${window.location.origin}/api/connect/${roomId}`, assets, schema: syncSchema })
 
 	const loadBoard = useCallback(async () => {
 		setBoardError(null)
@@ -128,6 +131,7 @@ export function Room() {
 			<span className={`aw-role aw-role-${board.role}`}>{board.role}</span>
 			<button onClick={() => navigate('/boards')}>Dashboard</button>
 			<button className={historyOpen ? 'aw-active' : ''} onClick={() => setHistoryOpen((open) => !open)}>History</button>
+			<button className={inspectorOpen ? 'aw-active' : ''} onClick={() => setInspectorOpen((open) => !open)}>Semantic</button>
 			<button onClick={() => void copyText(window.location.href).then(setLinkCopied)}>{linkCopied ? 'Link copied!' : 'Copy room link'}</button>
 			{board.role === 'owner' ? <button className={shareOpen ? 'aw-active' : ''} onClick={() => setShareOpen(true)}>Share</button> : null}
 			<button onClick={() => setPresenting((value) => !value)}>{presenting ? 'Exit presentation' : 'Present'}</button>
@@ -158,6 +162,11 @@ export function Room() {
 			canRestore={!isViewer}
 			getExpectedClock={getExpectedClock}
 			onClose={() => setHistoryOpen(false)}
+		/> : null}
+		{inspectorOpen ? <SemanticInspectorPanel
+			boardId={roomId}
+			canEdit={!isViewer}
+			onClose={() => setInspectorOpen(false)}
 		/> : null}
 	</div>
 }

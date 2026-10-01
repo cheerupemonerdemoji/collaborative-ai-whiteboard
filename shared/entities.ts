@@ -45,8 +45,8 @@ const relation = z.object({ type: z.enum(RELATION_TYPES), targetId: entityId }).
 // Bounded per docs/chibi-robo/whiteboard-integration-plan.md's one-hop, non-graph-language constraint.
 const relations = z.array(relation).max(20)
 
-const TEST_TYPES = ['simulation', 'physical'] as const
-const EVIDENCE_KINDS = [
+export const TEST_TYPES = ['simulation', 'physical'] as const
+export const EVIDENCE_KINDS = [
 	'git_commit',
 	'file_path',
 	'cad_file',
@@ -55,6 +55,9 @@ const EVIDENCE_KINDS = [
 	'graph',
 	'document',
 	'url',
+	/** A structured result table (shared/evidence-tables.ts), stored as a validated JSON
+	 * artifact through the board asset system. `reference` holds the artifact's upload id. */
+	'table',
 ] as const
 
 /**
@@ -163,11 +166,26 @@ const riskEntity = z.object({
 	mitigation: shortText.optional(),
 }).strict()
 
+/**
+ * Compact, bounded metadata for a `kind: 'table'` evidence artifact (shared/evidence-tables.ts),
+ * so semantic-context (and an AI reading it) can know a table exists, its size, and its column
+ * names without fetching the artifact. This is advisory, not authoritative: the server never
+ * verifies it matches the real artifact at entity-write time (crossing into the asset store from
+ * the semantic-action path is a boundary this design deliberately does not cross - see
+ * docs/development/structured-evidence-design.md). The Inspector always sets it from the same
+ * server response that validated the table, never independently.
+ */
+const tableSummary = z.object({
+	rows: z.number().int().nonnegative(),
+	columns: z.array(z.string().max(100)).max(20), // 20 matches EVIDENCE_TABLE_LIMITS.maxColumns
+}).strict()
+
 const evidenceEntity = z.object({
 	...baseFields('evidence', z.enum(STATUS_BY_TYPE.evidence)),
 	kind: z.enum(EVIDENCE_KINDS),
 	reference: evidenceReference,
 	note: shortText.optional(),
+	tableSummary: tableSummary.optional(),
 }).strict()
 
 export const engineeringEntitySchema = z.discriminatedUnion('entityType', [
@@ -188,6 +206,65 @@ export function statusValuesFor(entityType: EntityType): readonly string[] {
 
 export function defaultStatusFor(entityType: EntityType): string {
 	return STATUS_BY_TYPE[entityType][0]
+}
+
+/**
+ * Client field metadata for a schema-aware create/edit form, colocated with (and only ever
+ * changed alongside) the `*Entity` Zod schemas above rather than introspected via Zod internals
+ * or duplicated in a separate client-side validation layer. This describes shape only -- which
+ * generic keys exist per entity type, and how to render an input for each -- never validation.
+ * The server's `engineeringEntitySchema.parse` remains the sole source of truth for whether a
+ * value is actually accepted; a form built from this metadata can still be rejected, and the
+ * caller must surface that rejection rather than predict or bypass it.
+ */
+export type EntityFieldKind = 'text' | 'longText' | 'enum' | 'scalarMap'
+export interface EntityFieldSpec {
+	key: string
+	label: string
+	kind: EntityFieldKind
+	required?: boolean
+	options?: readonly string[]
+}
+const RISK_LEVELS = ['low', 'medium', 'high'] as const
+const INTERFACE_KINDS = ['mechanical', 'electrical', 'data', 'power', 'control'] as const
+export const ENTITY_FIELD_SPECS: Record<EntityType, readonly EntityFieldSpec[]> = {
+	component: [
+		{ key: 'subsystem', label: 'Subsystem', kind: 'text' },
+		{ key: 'description', label: 'Description', kind: 'longText' },
+	],
+	interface: [
+		{ key: 'kind', label: 'Kind', kind: 'enum', options: INTERFACE_KINDS },
+		{ key: 'description', label: 'Description', kind: 'longText' },
+	],
+	requirement: [
+		{ key: 'statement', label: 'Statement', kind: 'longText' },
+	],
+	task: [
+		{ key: 'owner', label: 'Owner', kind: 'text' },
+		{ key: 'description', label: 'Description', kind: 'longText' },
+	],
+	experiment: [
+		{ key: 'objective', label: 'Objective', kind: 'longText' },
+		{ key: 'hypothesis', label: 'Hypothesis', kind: 'longText' },
+		{ key: 'testType', label: 'Test type', kind: 'enum', options: TEST_TYPES },
+		{ key: 'parameters', label: 'Parameters', kind: 'scalarMap' },
+		{ key: 'metrics', label: 'Metrics', kind: 'scalarMap' },
+		{ key: 'passCriteria', label: 'Pass criteria', kind: 'longText' },
+		{ key: 'result', label: 'Result', kind: 'longText' },
+	],
+	decision: [
+		{ key: 'rationale', label: 'Rationale', kind: 'longText' },
+	],
+	risk: [
+		{ key: 'likelihood', label: 'Likelihood', kind: 'enum', options: RISK_LEVELS },
+		{ key: 'impact', label: 'Impact', kind: 'enum', options: RISK_LEVELS },
+		{ key: 'mitigation', label: 'Mitigation', kind: 'longText' },
+	],
+	evidence: [
+		{ key: 'kind', label: 'Kind', kind: 'enum', options: EVIDENCE_KINDS, required: true },
+		{ key: 'reference', label: 'Reference', kind: 'text', required: true },
+		{ key: 'note', label: 'Note', kind: 'longText' },
+	],
 }
 
 /* ---------------------------------------------------------- semantic actions -- */
@@ -212,6 +289,10 @@ const createEntity = z.object({
 	title,
 	status: z.string().max(40).optional(),
 	fields: genericFields.optional(),
+	// First-class, not part of `fields`: tableSummary's shape ({rows, columns: string[]}) does
+	// not fit genericFields' scalar/scalar-map/entity-id-array union, the same way title/status
+	// are first-class rather than squeezed through it.
+	tableSummary: tableSummary.optional(),
 }).strict()
 
 const updateEntity = z.object({
@@ -221,6 +302,7 @@ const updateEntity = z.object({
 	status: z.string().max(40).optional(),
 	shapeId: shapeIdField.nullable().optional(),
 	fields: genericFields.optional(),
+	tableSummary: tableSummary.optional(),
 }).strict()
 
 const linkEntities = z.object({

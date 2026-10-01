@@ -7,32 +7,24 @@ import {
 	TLSocketRoom,
 	type WebSocketMinimal,
 } from '@tldraw/sync-core'
-import { createTLSchema, defaultShapeSchemas, type TLRecord } from '@tldraw/tlschema'
+import type { TLRecord } from '@tldraw/tlschema'
 import Database from 'better-sqlite3'
 import type { AccountEventRecord, BoardRole } from './auth-db'
 import { BoardHistoryRecorder, BoardHistoryStore } from './history'
 import { HistorySyncStorage, type HistoryWriteContext } from './history-storage'
 import type { HistorySource } from '../shared/history'
-import { engineeringEntitySchema } from '../shared/entities'
+import { syncSchema } from '../shared/schema'
 
 let roomDirectory = join(resolve(process.env.CANVAS_DATA_DIR ?? './data'), 'rooms')
 mkdirSync(roomDirectory, { recursive: true })
 
 /**
- * A single custom document-scoped record type carries all eight Chibi Robo entity types via
- * an internal `entityType` discriminant, rather than registering eight separate tldraw record
- * types. It rides the existing snapshot/sync/checkpoint/restore machinery for free, the same
- * way shape records do. See docs/reviews/2026-09-22-chibi-entity-design-deepseek.md.
+ * The application store schema, shared with the browser (see shared/schema.ts). It registers the
+ * single document-scoped `engineering_entity` record type, so entities ride the existing
+ * snapshot/sync/checkpoint/restore machinery like shape records do. Every browser store must be
+ * built from this same schema or it cannot deserialize a board containing an entity.
  */
-export const schema = createTLSchema({
-	shapes: { ...defaultShapeSchemas },
-	records: {
-		engineering_entity: {
-			scope: 'document',
-			validator: { validate: (record: unknown) => engineeringEntitySchema.parse(record) },
-		},
-	},
-})
+export const schema = syncSchema
 
 export interface RoomSessionMeta {
 	userId: string
