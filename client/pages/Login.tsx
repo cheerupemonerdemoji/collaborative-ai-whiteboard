@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from 'react'
-import { Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { apiRequest, ApiError, AuthStatusScreen, useAuth } from '../auth'
 
 type Mode = 'login' | 'register'
@@ -119,6 +119,7 @@ export function Login() {
 					{submitting ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
 				</button>
 			</form>
+			<p className="aw-muted aw-login-help">New to the whiteboard? <Link to="/help">Open the User Guide</Link></p>
 		</section>
 	</main>
 }

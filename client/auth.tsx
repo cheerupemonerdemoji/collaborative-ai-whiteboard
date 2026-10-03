@@ -95,7 +95,8 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 	return body as T
 }
 
-const AuthContext = createContext<AuthContextValue | null>(null)
+export type { AuthContextValue }
+export const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
 	const [user, setUser] = useState<AuthUser | null>(null)
