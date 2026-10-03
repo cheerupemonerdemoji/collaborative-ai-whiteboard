@@ -9,6 +9,7 @@ import { getBookmarkPreview } from '../getBookmarkPreview'
 import { HistoryPanel } from '../history/HistoryPanel'
 import { createMultiplayerAssetStore } from '../multiplayerAssetStore'
 import { SemanticInspectorPanel } from '../semantic/SemanticInspectorPanel'
+import { HelpLink } from '../help/HelpPage'
 import { type BoardSummary } from './Dashboard'
 import '../account-history.css'
 
@@ -135,6 +136,7 @@ export function Room() {
 			<button onClick={() => void copyText(window.location.href).then(setLinkCopied)}>{linkCopied ? 'Link copied!' : 'Copy room link'}</button>
 			{board.role === 'owner' ? <button className={shareOpen ? 'aw-active' : ''} onClick={() => setShareOpen(true)}>Share</button> : null}
 			<button onClick={() => setPresenting((value) => !value)}>{presenting ? 'Exit presentation' : 'Present'}</button>
+			<HelpLink />
 			<div className="aw-user-menu">
 				<div className="aw-avatar" aria-hidden="true">{initials(user?.displayName ?? '')}</div>
 				<div><strong>{user?.displayName}</strong><small>{user?.login}</small></div>

@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiRequest, useAuth } from '../auth'
+import { HelpLink } from '../help/HelpPage'
 import { copyText } from '../SharingPanel'
 
 export type BoardRole = 'owner' | 'editor' | 'viewer'
@@ -171,10 +172,13 @@ export function Dashboard() {
 	return <main className="aw-dashboard">
 		<header className="aw-dashboard-header">
 			<div className="aw-dashboard-brand"><span className="aw-brand-mark" aria-hidden="true">✦</span><span>Collaborative AI Canvas</span></div>
-			<div className="aw-user-menu">
-				<div className="aw-avatar" aria-hidden="true">{initials(user?.displayName ?? '')}</div>
-				<div><strong>{user?.displayName}</strong><small>{user?.login}</small></div>
-				<button onClick={() => void signOut()}>Sign out</button>
+			<div className="aw-dashboard-actions">
+				<HelpLink />
+				<div className="aw-user-menu">
+					<div className="aw-avatar" aria-hidden="true">{initials(user?.displayName ?? '')}</div>
+					<div><strong>{user?.displayName}</strong><small>{user?.login}</small></div>
+					<button onClick={() => void signOut()}>Sign out</button>
+				</div>
 			</div>
 		</header>
 		<section className="aw-dashboard-content">

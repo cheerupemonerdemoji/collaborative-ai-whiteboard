@@ -1,0 +1,63 @@
+.aw-help-link { display: inline-block; font: inherit; border: 1px solid #d8deea; border-radius: 8px; padding: 7px 11px; background: white; color: #27334b; cursor: pointer; text-decoration: none; }
+.aw-help-link:hover { background: #f8fafc; }
+.aw-help-link:focus-visible, .aw-help a:focus-visible { outline: 2px solid #4338ca; outline-offset: 2px; }
+.topbar .aw-help-link { margin-left: 0; }
+
+.aw-help { min-height: 100vh; background: #f6f8fb; color: #172033; }
+.aw-help-header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 20px; background: #fff; border-bottom: 1px solid #dce2ec; }
+.aw-help-brand { display: flex; align-items: center; gap: 9px; font-weight: 750; color: #172033; text-decoration: none; }
+.aw-help-brand-sub { font-weight: 500; color: #667085; padding-left: 10px; border-left: 1px solid #dce2ec; }
+.aw-help-appnav a { color: #4338ca; font-weight: 650; text-decoration: none; }
+.aw-help-appnav a:hover { text-decoration: underline; }
+
+.aw-help-body { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 32px; max-width: 1120px; margin: 0 auto; padding: 28px 20px 60px; }
+.aw-help-toc { position: sticky; top: 74px; align-self: start; max-height: calc(100vh - 94px); overflow-y: auto; }
+.aw-help-toc h2 { margin: 0 0 10px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #667085; }
+.aw-help-toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.aw-help-toc a { display: block; padding: 8px 11px; border-radius: 8px; color: #27334b; text-decoration: none; font-size: 14px; }
+.aw-help-toc a:hover { background: #eaeef6; }
+.aw-help-toc a.active { background: #eef2ff; color: #4338ca; font-weight: 650; }
+
+.aw-help-main { min-width: 0; }
+.aw-help-article { background: #fff; border: 1px solid #dce2ec; border-radius: 14px; padding: 30px 36px; line-height: 1.65; font-size: 16px; }
+.aw-help-article h1 { margin: 0 0 14px; font-size: 30px; line-height: 1.2; }
+.aw-help-article h1:focus { outline: none; }
+.aw-help-article h2 { margin: 34px 0 10px; padding-top: 6px; font-size: 22px; border-top: 1px solid #eef1f6; }
+.aw-help-article h3 { margin: 26px 0 8px; font-size: 18px; }
+.aw-help-article h4 { margin: 20px 0 6px; font-size: 16px; }
+.aw-help-article p { margin: 0 0 14px; }
+.aw-help-article ul, .aw-help-article ol { margin: 0 0 16px; padding-left: 24px; }
+.aw-help-article li { margin: 4px 0; }
+.aw-help-article a { color: #4338ca; }
+.aw-help-article code { padding: 1px 5px; border-radius: 5px; background: #eef2f7; font-size: .9em; }
+.aw-help-article pre { margin: 0 0 18px; padding: 14px 16px; overflow-x: auto; border-radius: 10px; background: #172033; color: #e6ebf5; line-height: 1.5; font-size: 13.5px; }
+.aw-help-article pre code { padding: 0; background: transparent; color: inherit; font-size: inherit; }
+.aw-help-article blockquote { margin: 0 0 16px; padding: 4px 18px; border-left: 4px solid #c7d2fe; background: #f8faff; border-radius: 0 8px 8px 0; color: #27334b; }
+.aw-help-article blockquote p { margin: 10px 0; }
+.aw-help-article hr { border: 0; border-top: 1px solid #e2e8f0; margin: 24px 0; }
+.aw-help-table-wrap { overflow-x: auto; margin: 0 0 18px; }
+.aw-help-article table { border-collapse: collapse; min-width: 60%; font-size: 14.5px; }
+.aw-help-article th, .aw-help-article td { padding: 8px 12px; border: 1px solid #dce2ec; vertical-align: top; }
+.aw-help-article th { background: #f1f5f9; }
+
+.aw-help-pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 18px; }
+.aw-help-pager a { display: grid; gap: 2px; padding: 12px 16px; border: 1px solid #dce2ec; border-radius: 10px; background: #fff; color: #4338ca; text-decoration: none; font-weight: 650; }
+.aw-help-pager a:hover { background: #f8faff; }
+.aw-help-pager a[rel='next'] { text-align: right; margin-left: auto; }
+.aw-help-pager small { color: #667085; font-weight: 500; }
+
+@media (max-width: 860px) {
+	.aw-help-body { grid-template-columns: 1fr; gap: 18px; padding-top: 18px; }
+	.aw-help-toc { position: static; max-height: none; }
+	.aw-help-toc h2 { margin-bottom: 6px; }
+	.aw-help-toc ol { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0 6px; }
+	.aw-help-toc a { padding: 6px 9px; font-size: 13.5px; }
+	.aw-help-article { padding: 20px 18px; font-size: 15.5px; }
+	.aw-help-article h1 { font-size: 25px; }
+	.aw-help-brand-sub { display: none; }
+}
+
+.aw-dashboard-actions { display: flex; align-items: center; gap: 14px; }
+.aw-login-help { margin: 14px 0 0; text-align: center; font-size: 14px; }
+.aw-login-help a { color: #4338ca; font-weight: 650; }
+@media (max-width: 760px) { .aw-dashboard-actions { gap: 8px; } }
