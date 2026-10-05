@@ -105,6 +105,26 @@ head first, regardless of whether the caller is human or machine -- an AI
 client cannot silently discard history by restoring, only create a new head
 with the prior state preserved and checkpointed.
 
+## The machine API has its own hostname (Public Machine API V1)
+
+Machine clients do not use the browser hostname. They use a separate hostname
+that sits behind a Cloudflare Access **Service Auth** policy, and the origin
+re-verifies the signed Access assertion itself, so the API stays closed even if
+the Access application is misconfigured or removed. A request therefore has to
+clear two independent layers: a Cloudflare service token (may this machine reach
+the API?) and a board-scoped whiteboard bearer token (which boards, which
+operations?). Neither alone is enough, and they travel in different headers.
+
+On that hostname only a fixed allowlist of operations exists (everything else is
+a JSON 404), session cookies are discarded and never authenticate, and the web
+app, login, registration, invitations, board lists, uploads, assets and
+WebSockets are unreachable. The browser hostname, in turn, refuses any request
+that carries an `Authorization` header under `/api/`, so a bearer token cannot
+be replayed there to skip Access. Design, threat model, Cloudflare steps,
+revocation and rollback: `docs/development/public-machine-api.md`. Implementation:
+`server/host-policy.ts`, `server/access-jwt.ts`, tests in `tests/machine-api.test.ts`
+and `tests/access-jwt.test.ts`.
+
 ## What is explicitly out of scope for V1
 
 - No autonomous background agents; every action is a synchronous request an

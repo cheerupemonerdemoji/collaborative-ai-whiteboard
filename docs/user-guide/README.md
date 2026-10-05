@@ -54,4 +54,5 @@ The **canvas** is for visual thinking: sketches, notes, diagrams, arrows. The **
 | [History & Restore](history-and-restore.md) | Seeing what changed, checkpoints, and going back |
 | [Roles & Sharing](roles-and-sharing.md) | Owner, Editor, Viewer, and inviting people |
 | [Example: Engineering Workflow](engineering-workflow-example.md) | A complete worked example from requirement to task |
+| [Agent API](agent-api.md) | Letting an approved AI agent read and work on a board from anywhere |
 | [Troubleshooting & FAQ](troubleshooting.md) | Quick answers to common questions |

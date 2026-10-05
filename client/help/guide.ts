@@ -23,6 +23,7 @@ export const GUIDE_PAGES: readonly GuidePage[] = [
 	{ slug: 'history-and-restore', file: 'history-and-restore.md', label: 'History & Restore' },
 	{ slug: 'roles-and-sharing', file: 'roles-and-sharing.md', label: 'Roles & Sharing' },
 	{ slug: 'engineering-workflow-example', file: 'engineering-workflow-example.md', label: 'Example: Engineering Workflow' },
+	{ slug: 'agent-api', file: 'agent-api.md', label: 'Agent API' },
 	{ slug: 'troubleshooting', file: 'troubleshooting.md', label: 'Troubleshooting & FAQ' },
 ]
 
