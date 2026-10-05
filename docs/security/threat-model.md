@@ -33,8 +33,12 @@ Per-board SQLite (state + history) + central auth.sqlite
 
 ### 1. Reverse proxy / tunnel (operational, not application code)
 
-The reference deployment puts Cloudflare Access in front of the application
-as an *additional*, optional outer gate. **The application does not trust
+The reference deployment may put Cloudflare Access in front of the application
+as an *additional*, optional outer gate; the reference production browser
+hostname uses application authentication only, and Cloudflare Access is used on
+the separate machine API hostname as a required first layer (service tokens),
+which the origin re-verifies from the signed assertion
+(`docs/security/ai-agent-security.md`). **The application does not trust
 this boundary for authorization** -- every route re-checks session and board
 membership independently, specifically so that self-hosting this project
 without Cloudflare Access (or with it later disabled) does not silently
