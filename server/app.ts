@@ -58,6 +58,8 @@ export interface RateLimitOptions {
 	assetRead?: RateLimitSetting
 	/** Reads made with a machine bearer token (canvas, semantic context, history, checkpoint list). */
 	machineRead?: RateLimitSetting
+	/** Every request to the machine hostname, counted before the Access assertion is verified. */
+	machineGate?: RateLimitSetting
 }
 
 export interface BuildAppOptions {
@@ -89,6 +91,11 @@ const ASSET_READ_WINDOW_MS = 60_000
 /** Machine-token reads. Writes, checkpoints and restores already have their own budgets. */
 const MACHINE_READ_LIMIT = 300
 const MACHINE_READ_WINDOW_MS = 60_000
+// Ceiling on all requests to the machine hostname, applied before any verification work. Normal agent
+// traffic is far below it (per-token budgets are 120-300/min); it bounds origin CPU if the Cloudflare edge
+// were ever bypassed or misconfigured, at the cost of 429s for every agent while a flood lasts.
+const MACHINE_GATE_LIMIT = 3_000
+const MACHINE_GATE_WINDOW_MS = 60_000
 const AI_EVENT_TYPES = [
 	'ai.requested',
 	'ai.suggestion_generated',
@@ -236,6 +243,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	const uploadLimiter = limiterFor(options.rateLimits?.upload, UPLOAD_LIMIT, UPLOAD_WINDOW_MS)
 	const assetReadLimiter = limiterFor(options.rateLimits?.assetRead, ASSET_READ_LIMIT, ASSET_READ_WINDOW_MS)
 	const machineReadLimiter = limiterFor(options.rateLimits?.machineRead, MACHINE_READ_LIMIT, MACHINE_READ_WINDOW_MS)
+	const machineGateLimiter = limiterFor(options.rateLimits?.machineGate, MACHINE_GATE_LIMIT, MACHINE_GATE_WINDOW_MS)
 	const hostPolicy = createHostPolicy(options.hostPolicy ?? hostPolicyFromEnv(process.env, (teamDomain, audience) => createAccessVerifier({ teamDomain, audience })))
 	const allowed = allowedOrigins(process.env.CANVAS_ALLOWED_ORIGINS)
 	configureRoomAuditReader((boardId, after) => authService.database.listBoardEventsSince(boardId, after).map((event) => ({
@@ -351,6 +359,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			return
 		}
 		reply.header('Cache-Control', 'no-store')
+		// Pre-authentication ceiling for the machine hostname only; human traffic never reaches this line.
+		if (!machineGateLimiter.allow('machine-host')) return tooManyRequests(reply, 'requests')
 		if (hostPolicy.requireAccess) {
 			if (!hostPolicy.accessVerifier) return reply.code(503).send({ error: 'Machine API is not available' })
 			const assertion = request.headers['cf-access-jwt-assertion']

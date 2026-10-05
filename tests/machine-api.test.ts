@@ -354,6 +354,76 @@ describe('private hostnames', () => {
 	})
 })
 
+describe('machine hostname: pre-authentication request ceiling', () => {
+	const health = (app: FastifyInstance, headers: Record<string, string>) => app.inject({ method: 'GET', url: '/api/health', headers })
+
+	it('leaves normal machine traffic below the ceiling unaffected', async () => {
+		const { app } = await setup({ rateLimits: { machineGate: { limit: 5, windowMs: 60_000 } } })
+		for (let i = 0; i < 5; i += 1) expect((await health(app, machine())).statusCode, `request ${i + 1}`).toBe(200)
+		expect((await app.inject({ method: 'GET', url: '/api/rooms/board-a/semantic-context', headers: machine(tokens.readerA) })).statusCode).toBe(429)
+	})
+
+	it('answers 429 once the ceiling is exceeded, with a JSON body and no data', async () => {
+		const { app } = await setup({ rateLimits: { machineGate: { limit: 3, windowMs: 60_000 } } })
+		for (let i = 0; i < 3; i += 1) expect((await health(app, machine())).statusCode).toBe(200)
+		const refused = await health(app, machine())
+		expect(refused.statusCode).toBe(429)
+		expect(refused.headers['content-type']).toContain('application/json')
+		expect(refused.json()).toEqual({ error: 'Too many requests. Try again later.' })
+		expect(refused.headers['cache-control']).toBe('no-store')
+	})
+
+	it('counts requests before the Access assertion is verified, so a flood of bad credentials is bounded', async () => {
+		let verifications = 0
+		const countingVerifier: AccessVerifier = { async verify(assertion) { verifications += 1; return accessVerifier.verify(assertion) } }
+		const { app } = await setup({
+			hostPolicy: { publicHost: HUMAN_HOST, machineHost: MACHINE_HOST, accessVerifier: countingVerifier },
+			rateLimits: { machineGate: { limit: 3, windowMs: 60_000 } },
+		})
+		verifications = 0
+		for (let i = 0; i < 3; i += 1) expect((await health(app, { host: MACHINE_HOST, 'cf-access-jwt-assertion': 'forged' })).statusCode).toBe(403)
+		expect(verifications).toBe(3)
+		for (let i = 0; i < 20; i += 1) expect((await health(app, { host: MACHINE_HOST, 'cf-access-jwt-assertion': 'forged' })).statusCode).toBe(429)
+		expect(verifications, 'the verifier is not invoked once the ceiling is hit').toBe(3)
+	})
+
+	it('does not weaken Access verification: below the ceiling, missing and invalid assertions still fail closed', async () => {
+		const { app } = await setup({ rateLimits: { machineGate: { limit: 50, windowMs: 60_000 } } })
+		expect((await health(app, { host: MACHINE_HOST })).statusCode).toBe(403)
+		expect((await health(app, { host: MACHINE_HOST, 'cf-access-jwt-assertion': 'abc' })).statusCode).toBe(403)
+		expect((await app.inject({ method: 'GET', url: '/api/rooms/board-a/semantic-context', headers: { host: MACHINE_HOST, authorization: `Bearer ${tokens.readerA}` } })).statusCode).toBe(403)
+		expect((await app.inject({ method: 'GET', url: '/api/boards', headers: { host: MACHINE_HOST, cookie: 'canvas_session=x' } })).statusCode).toBe(403)
+		expect((await health(app, machine())).statusCode).toBe(200)
+	})
+
+	it('does not apply to the human hostname or to private hosts', async () => {
+		const { app, cookie } = await setup({ rateLimits: { machineGate: { limit: 2, windowMs: 60_000 } } })
+		for (let i = 0; i < 12; i += 1) {
+			expect((await health(app, { host: HUMAN_HOST })).statusCode, `human ${i}`).toBe(200)
+			expect((await app.inject({ method: 'GET', url: '/api/boards', headers: { host: HUMAN_HOST, cookie } })).statusCode).toBe(200)
+			expect((await health(app, { host: '127.0.0.1:8787' })).statusCode, `private ${i}`).toBe(200)
+		}
+		expect((await health(app, machine())).statusCode).toBe(200)
+	})
+
+	it('keeps the per-token route budgets in force underneath the ceiling', async () => {
+		const { app } = await setup({ rateLimits: { machineGate: { limit: 100, windowMs: 60_000 }, machineRead: { limit: 2, windowMs: 60_000 } } })
+		const read = () => app.inject({ method: 'GET', url: '/api/rooms/board-a/semantic-context', headers: machine(tokens.readerA) })
+		expect((await read()).statusCode).toBe(200)
+		expect((await read()).statusCode).toBe(200)
+		expect((await read()).statusCode).toBe(429)
+	})
+
+	it('defaults to 3000 requests per minute', async () => {
+		const { app } = await setup()
+		let ok = 0
+		for (let i = 0; i < 3_000; i += 1) if ((await health(app, machine())).statusCode === 200) ok += 1
+		expect(ok).toBe(3_000)
+		expect((await health(app, machine())).statusCode).toBe(429)
+		expect((await health(app, { host: HUMAN_HOST })).statusCode).toBe(200)
+	})
+})
+
 describe('host policy', () => {
 	it('normalizes hosts strictly and rejects ambiguous values', () => {
 		expect(normalizeHost('Whiteboard-API.Example.Test:8443')).toBe('whiteboard-api.example.test')
