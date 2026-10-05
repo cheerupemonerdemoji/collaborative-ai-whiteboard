@@ -1,0 +1,16 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`machine hostname: only the machine API is served > the allowlist is exactly the set of operations that already accept a board-scoped bearer token 1`] = `
+[
+  "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/checkpoints$",
+  "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/history$",
+  "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/history\\/\\d{1,15}\\/snapshot$",
+  "GET ^\\/api\\/health$",
+  "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/canvas$",
+  "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/semantic-context$",
+  "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/checkpoints$",
+  "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/restore$",
+  "POST ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/actions$",
+  "POST ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/ai\\/events$",
+]
+`;

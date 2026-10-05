@@ -1,5 +1,7 @@
 # Authorization matrix
 
+> **Hostname gate (Public Machine API V1).** The bearer-token columns below apply on the machine hostname (after Cloudflare Access service auth and origin-side assertion verification) and on private/loopback hosts. On the public browser hostname a request carrying `Authorization` under `/api/` is refused with 401. See `docs/development/public-machine-api.md`.
+
 What each identity can do, as implemented in `server/app.ts` and exercised by
 `tests/server-app.test.ts`, `tests/chibi-semantics.test.ts`, and
 `scripts/public-acceptance.mjs`. "Denied" means the server refuses the

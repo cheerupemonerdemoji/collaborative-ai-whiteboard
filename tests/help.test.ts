@@ -40,10 +40,10 @@ const SIGNED_IN: AuthContextValue['user'] = {
 }
 
 describe('user guide content', () => {
-	it('ships exactly the nine documented pages, each non-empty', () => {
+	it('ships exactly the ten documented pages, each non-empty', () => {
 		const files = readdirSync(GUIDE_DIRECTORY).filter((name) => name.endsWith('.md')).sort()
 		expect(files).toEqual(GUIDE_PAGES.map((page) => page.file).sort())
-		expect(GUIDE_PAGES).toHaveLength(9)
+		expect(GUIDE_PAGES).toHaveLength(10)
 		for (const page of GUIDE_PAGES) expect(guideSource(page).length, page.file).toBeGreaterThan(500)
 	})
 
@@ -95,12 +95,33 @@ describe('user guide content', () => {
 			['secret', /bearer|api key|secret|\btoken\b/i],
 			['internal api', /engineering_entity|\/api\/|semantic-context|asset id|upload id/i],
 		]
+		// The Agent API guide must name credentials, the access layer and the API routes, so it is exempt from
+		// exactly those four checks. Every check about hosts, paths, addresses, identities and hashes still applies.
+		const agentGuideMayMention = new Set(['infrastructure', 'secret', 'internal api'])
 		for (const page of GUIDE_PAGES) {
 			for (const [name, pattern] of forbidden) {
+				if (page.file === 'agent-api.md' && agentGuideMayMention.has(name)) continue
 				const hit = pattern.exec(guideSource(page))
 				expect(hit, `${page.file} contains a ${name}: ${hit?.[0]}`).toBeNull()
 			}
 		}
+	})
+
+	it('the Agent API guide uses placeholders only and never a real credential, host or identifier', () => {
+		const text = guideSource(findGuidePage('agent-api')!)
+		for (const name of ['WHITEBOARD_API_BASE', 'CF_ACCESS_CLIENT_ID', 'CF_ACCESS_CLIENT_SECRET', 'WHITEBOARD_TOKEN']) expect(text, name).toContain(name)
+		expect(text).not.toMatch(/https?:\/\/(?!example\.com)[^\s"`)]*\.[a-z]{2,}/i)
+		expect(text).not.toMatch(/cloudflareaccess\.com|[A-Za-z0-9_-]{40,}/)
+		expect(text).not.toMatch(/Bearer (?!\$WHITEBOARD_TOKEN)\S/)
+		expect(text).not.toMatch(/CF-Access-Client-(Id|Secret): (?!\$CF_ACCESS)/)
+	})
+
+	it('the Agent API guide documents exactly the routes the server allows machines to call', async () => {
+		const { MACHINE_ROUTES, isMachineRoute } = await import('../server/host-policy')
+		const text = guideSource(findGuidePage('agent-api')!)
+		const documented = [...text.matchAll(/^\| `(GET|POST) (\/api\/[^`\s]+)`/gm)].map((match) => ({ method: match[1], url: match[2].replace('BOARD_ID', 'board-a').replace('EVENT_ID', '12') }))
+		for (const route of documented) expect(isMachineRoute(route.method, route.url), `${route.method} ${route.url}`).toBe(true)
+		expect(documented).toHaveLength(MACHINE_ROUTES.length)
 	})
 
 	it('documents every entity type and every relationship type the product has', () => {
@@ -173,7 +194,7 @@ describe('help site rendering', () => {
 			if (title?.kind === 'heading') expect(out, page.file).toContain(`<h1 id="${title.id}"`)
 			if (index > 0) expect(out, page.file).toMatch(new RegExp(`rel="prev" href="${guidePath(GUIDE_PAGES[index - 1])}"`))
 			if (index < GUIDE_PAGES.length - 1) expect(out, page.file).toMatch(new RegExp(`rel="next" href="${guidePath(GUIDE_PAGES[index + 1])}"`))
-			expect(out, page.file).not.toContain('/api/')
+			if (page.file !== 'agent-api.md') expect(out, page.file).not.toContain('/api/')
 		})
 	})
 

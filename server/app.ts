@@ -36,6 +36,8 @@ import {
 	sessionCookie,
 	SlidingWindowRateLimiter,
 } from './security'
+import { createAccessVerifier } from './access-jwt'
+import { createHostPolicy, hostPolicyFromEnv, isMachineRoute, type HostPolicyConfig } from './host-policy'
 import { authorizeApiToken, type ApiPermission } from './tokens'
 import { evidenceTableArtifactId, EVIDENCE_TABLE_LIMITS, evidenceTableSchema, summaryForTable } from '../shared/evidence-tables'
 import type { HistoryEvent, HistoryEventFilters, HistorySource, HistoryEventType } from '../shared/history'
@@ -54,6 +56,8 @@ export interface RateLimitOptions {
 	invitation?: RateLimitSetting
 	upload?: RateLimitSetting
 	assetRead?: RateLimitSetting
+	/** Reads made with a machine bearer token (canvas, semantic context, history, checkpoint list). */
+	machineRead?: RateLimitSetting
 }
 
 export interface BuildAppOptions {
@@ -62,6 +66,8 @@ export interface BuildAppOptions {
 	serveClient?: boolean
 	logger?: FastifyServerOptions['logger']
 	rateLimits?: RateLimitOptions
+	/** Public hostname classes; defaults to the CANVAS_PUBLIC_HOST / CANVAS_MACHINE_API_HOST / CANVAS_ACCESS_* environment. */
+	hostPolicy?: HostPolicyConfig
 }
 
 const ALL_PERMISSIONS: readonly ApiPermission[] = ['read', 'write', 'history', 'restore']
@@ -80,6 +86,9 @@ const UPLOAD_WINDOW_MS = 15 * 60_000
 /** Opening a board fetches each visible asset, so reads get far more headroom than uploads. */
 const ASSET_READ_LIMIT = 600
 const ASSET_READ_WINDOW_MS = 60_000
+/** Machine-token reads. Writes, checkpoints and restores already have their own budgets. */
+const MACHINE_READ_LIMIT = 300
+const MACHINE_READ_WINDOW_MS = 60_000
 const AI_EVENT_TYPES = [
 	'ai.requested',
 	'ai.suggestion_generated',
@@ -226,6 +235,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	const invitationLimiter = limiterFor(options.rateLimits?.invitation, INVITATION_LIMIT, INVITATION_WINDOW_MS)
 	const uploadLimiter = limiterFor(options.rateLimits?.upload, UPLOAD_LIMIT, UPLOAD_WINDOW_MS)
 	const assetReadLimiter = limiterFor(options.rateLimits?.assetRead, ASSET_READ_LIMIT, ASSET_READ_WINDOW_MS)
+	const machineReadLimiter = limiterFor(options.rateLimits?.machineRead, MACHINE_READ_LIMIT, MACHINE_READ_WINDOW_MS)
+	const hostPolicy = createHostPolicy(options.hostPolicy ?? hostPolicyFromEnv(process.env, (teamDomain, audience) => createAccessVerifier({ teamDomain, audience })))
 	const allowed = allowedOrigins(process.env.CANVAS_ALLOWED_ORIGINS)
 	configureRoomAuditReader((boardId, after) => authService.database.listBoardEventsSince(boardId, after).map((event) => ({
 		...event,
@@ -319,6 +330,37 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			return error instanceof Error ? error.message : String(error)
 		}
 	}
+
+	if (hostPolicy.machineHost && hostPolicy.requireAccess && !hostPolicy.accessVerifier) {
+		app.log.warn('CANVAS_MACHINE_API_HOST is set without CANVAS_ACCESS_TEAM_DOMAIN and CANVAS_ACCESS_AUD; the machine hostname will refuse every request')
+	}
+
+	// Hostname isolation (docs/development/public-machine-api.md). Registered first so it runs before
+	// the origin check, authentication, static files, and the SPA fallback.
+	app.addHook('onRequest', async (request, reply) => {
+		const hostClass = hostPolicy.classify(request.headers.host)
+		if (hostClass === 'private') return
+		if (hostClass === 'invalid') return reply.code(400).send({ error: 'Invalid Host header' })
+		const path = request.url.split('?')[0]
+		if (hostClass === 'human') {
+			// The browser hostname never accepts machine credentials, so no public path bypasses the
+			// machine hostname's Cloudflare Access layer. Browsers do not send Authorization headers here.
+			if (path.startsWith('/api/') && request.headers.authorization !== undefined) {
+				return reply.code(401).send({ error: 'Machine credentials are not accepted on this hostname' })
+			}
+			return
+		}
+		reply.header('Cache-Control', 'no-store')
+		if (hostPolicy.requireAccess) {
+			if (!hostPolicy.accessVerifier) return reply.code(503).send({ error: 'Machine API is not available' })
+			const assertion = request.headers['cf-access-jwt-assertion']
+			const verdict = await hostPolicy.accessVerifier.verify(typeof assertion === 'string' ? assertion : undefined)
+			if (!verdict.ok) return reply.code(403).send({ error: 'Cloudflare Access credentials required' })
+		}
+		if (!isMachineRoute(request.method, request.url)) return reply.code(404).send({ error: 'Not found' })
+		// A browser session must never stand in for a machine credential on this hostname.
+		delete request.headers.cookie
+	})
 
 	app.addHook('onRequest', async (request, reply) => {
 		if (request.method !== 'POST' && request.method !== 'PUT' && request.method !== 'PATCH' && request.method !== 'DELETE') return
@@ -559,6 +601,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		const access = resolveBoardAccess(request, roomId)
 		if (access.kind === 'token') {
 			if (!access.permissions.has('read')) return denyAccess(reply, access)
+			if (!machineReadLimiter.allow(accessRateKey(access, 'read', roomId))) return tooManyRequests(reply, 'reads')
 		} else if (access.kind !== 'user') {
 			return denyAccess(reply, access)
 		}
@@ -595,6 +638,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		const access = resolveBoardAccess(request, roomId)
 		if (access.kind === 'token') {
 			if (!access.permissions.has('read')) return denyAccess(reply, access)
+			if (!machineReadLimiter.allow(accessRateKey(access, 'read', roomId))) return tooManyRequests(reply, 'reads')
 		} else if (access.kind !== 'user') {
 			return denyAccess(reply, access)
 		}
@@ -642,6 +686,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
 		const access = resolveBoardAccess(request, boardId)
 		if (!requireHistoryView(access)) return denyAccess(reply, access)
+		if (access.kind === 'token' && !machineReadLimiter.allow(accessRateKey(access, 'history-read', boardId))) return tooManyRequests(reply, 'history reads')
 		const query = request.query as Record<string, string | undefined>
 		const filters: HistoryEventFilters = {}
 		if (query.userId) filters.userId = query.userId
@@ -676,6 +721,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
 		const access = resolveBoardAccess(request, boardId)
 		if (!requireHistoryView(access)) return denyAccess(reply, access)
+		// Reconstructing a snapshot replays history, so token reads share the tighter snapshot budget.
+		if (access.kind === 'token' && !snapshotLimiter.allow(accessRateKey(access, 'snapshot-read', boardId))) return tooManyRequests(reply, 'snapshot reads')
 		const eventId = Number((request.params as { eventId: string }).eventId)
 		if (!Number.isSafeInteger(eventId) || eventId < 1) return reply.code(400).send({ error: 'Invalid event ID' })
 		const handle = getRoomHandle(boardId)
@@ -690,6 +737,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
 		const access = resolveBoardAccess(request, boardId)
 		if (!requireHistoryView(access)) return denyAccess(reply, access)
+		if (access.kind === 'token' && !machineReadLimiter.allow(accessRateKey(access, 'history-read', boardId))) return tooManyRequests(reply, 'history reads')
 		const rawLimit = (request.query as { limit?: string }).limit
 		const limit = rawLimit === undefined ? undefined : Number(rawLimit)
 		if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) return reply.code(400).send({ error: 'Invalid limit' })

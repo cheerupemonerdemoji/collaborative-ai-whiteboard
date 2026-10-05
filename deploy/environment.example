@@ -1,4 +1,10 @@
 # Optional service overrides. API token hashes are stored separately at
-# /home/app/.config/collaborative-ai-canvas/api-tokens.json.
+# /home/jam/.config/collaborative-ai-canvas/api-tokens.json.
 CANVAS_ALLOWED_ORIGINS=https://whiteboard.example.com,http://your-server,http://127.0.0.1:8787,http://localhost:8787
 CANVAS_ALLOW_OPEN_REGISTRATION=false
+
+# Public machine API: see .env.example and docs/development/public-machine-api.md.
+# CANVAS_PUBLIC_HOST=whiteboard.example.com
+# CANVAS_MACHINE_API_HOST=whiteboard-api.example.com
+# CANVAS_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+# CANVAS_ACCESS_AUD=<audience tag of the machine hostname Access application>
