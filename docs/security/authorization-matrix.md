@@ -11,8 +11,10 @@ are server-side checks, not UI-only restrictions.
 Identities:
 
 - **anonymous** -- no session cookie, no bearer token (may still be behind
-  an outer Cloudflare Access gate in the reference deployment; that gate is
-  a separate, optional layer -- see `docs/security/threat-model.md`).
+  an outer Cloudflare Access gate if an operator adds one; the reference
+  browser hostname does not use one, and the machine hostname requires Access
+  service auth before any of the bearer-token rows below can be reached -- see
+  `docs/security/threat-model.md`).
 - **authenticated nonmember** -- a valid application session, but no
   membership row for the board in question.
 - **viewer** / **editor** / **owner** -- a valid application session with

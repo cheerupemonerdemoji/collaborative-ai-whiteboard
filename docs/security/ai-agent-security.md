@@ -136,8 +136,8 @@ and `tests/access-jwt.test.ts`.
 - No AI-initiated account, invitation, or board-membership management --
   those remain human-session-only operations regardless of bearer-token
   scope.
-- Live, public-path verification that scope enforcement holds under real
-  network conditions is a currently-open acceptance item (production has
-  zero configured machine clients as of this writing) -- see
-  `docs/development/current-state.md` and
-  `docs/reviews/2026-09-22-chibi-entity-design-deepseek.md` finding 1.
+- (Closed 2026-10-05.) Live, public-path verification of scope enforcement was
+  completed through the machine API hostname, including from an off-tailnet
+  GitHub-hosted runner with no Tailscale: Cloudflare service auth, then the
+  board-scoped bearer token, then board and scope isolation, with machine
+  attribution in History.

@@ -4,7 +4,7 @@
 
 A room-based collaborative tldraw whiteboard with local accounts, board roles, and append-oriented history. Humans use the normal canvas tools; external AI clients on their own computers use a small authenticated API to read and edit the same native records. A reference production deployment runs this on a private Node/SQLite service, which also owns user accounts, sessions, board membership, and board history. An earlier Cloudflare Workers/Durable Objects architecture ("V1") is preserved as source under `worker/` and is not the deployed path.
 
-A reference deployment's public browser entry point looks like `https://whiteboard.example.com`, protected by Cloudflare Access and a Cloudflare Tunnel to the loopback-only Node service. Nothing about the application requires Cloudflare specifically -- any TLS-terminating reverse proxy or tunnel in front of the loopback-bound Node service works the same way.
+A reference deployment's public browser entry point looks like `https://whiteboard.example.com`, published through a Cloudflare Tunnel to the loopback-only Node service. The application's own accounts and board roles are the security boundary for people; Cloudflare Access is an optional outer gate and is not required. AI agents use a separate hostname that is protected by Cloudflare Access service authentication (see [Cloudflare public access](#cloudflare-public-access)). Nothing about the application requires Cloudflare specifically -- any TLS-terminating reverse proxy or tunnel in front of the loopback-bound Node service works the same way.
 
 _Screenshots/demo: none yet -- this is a self-hosted internal tool without a public demo instance. If you're evaluating it, the fastest way to see it is the local-development steps below._
 
@@ -114,20 +114,33 @@ limits are in-process and reset when the service restarts. `buildApp` accepts a
 
 ## Cloudflare public access
 
-The public route is `Cloudflare Access → Cloudflare Tunnel → http://127.0.0.1:8787`.
-Access is deny-by-default and is created before the published Tunnel route. The route
-uses Protect with Access. The Node service remains bound to loopback; do not forward
-port 8787 on the router and do not enable Tailscale Funnel.
+**People.** The public route is `Cloudflare Tunnel → http://127.0.0.1:8787`. The Node
+service remains bound to loopback; do not forward port 8787 on the router and do not
+enable Tailscale Funnel. People sign in with whiteboard accounts: they need an invitation
+and an owner/editor/viewer membership, and removing a board member closes their live
+board session. An operator may also put a Cloudflare Access application in front of the
+browser hostname, but the application does not rely on it, and this hostname refuses
+machine bearer tokens.
 
-Cloudflare Access and whiteboard accounts are independent gates. Passing Access only
-allows someone to reach the login page. The person still needs an invited whiteboard
-account and an owner/editor/viewer membership. Removing a board member closes their
-live board session; removing an Access identity blocks the outer route when Access
-revalidates it.
+**AI agents.** Machine clients use a second hostname, published through the same Tunnel
+and protected by a Cloudflare Access **Service Auth** policy that includes only the
+explicitly selected service tokens (no Everyone rule, no Bypass, no human-identity
+fallback). A request must clear two independent layers: the service token
+(`CF-Access-Client-Id` / `CF-Access-Client-Secret`), then the existing room-scoped
+whiteboard bearer token (`Authorization: Bearer ...`). The origin also verifies the
+signed Access assertion itself, so the hostname stays closed even if the Access
+application is removed or misconfigured. On that hostname only the machine API routes
+exist (no web app, login, registration, uploads, or WebSockets), session cookies never
+authenticate, and the whole hostname has a 3000 requests/minute ceiling in addition to
+the per-token budgets. Agents need no VPN or Tailscale.
 
-Keep machine AI clients on the private Tailnet endpoint initially. Publishing them
-requires a separate Cloudflare Access service-token policy in addition to the existing
-room-scoped whiteboard bearer token.
+Enable it with `CANVAS_PUBLIC_HOST`, `CANVAS_MACHINE_API_HOST`,
+`CANVAS_ACCESS_TEAM_DOMAIN` and `CANVAS_ACCESS_AUD` (see `.env.example`); behaviour is
+unchanged when they are unset. Create the Access application and service token first, set
+the variables and restart, and only then add the Tunnel public hostname, so the hostname
+is never reachable without Access in front of it. The agent-facing guide is
+`docs/user-guide/agent-api.md`, and `scripts/agent-api-smoke.sh` checks a new agent's
+credentials end to end.
 
 Monitoring locations:
 

@@ -1,4 +1,7 @@
 # Changelog
+- When `CANVAS_PUBLIC_HOST` is set, the browser hostname refuses requests that carry an `Authorization` header under `/api/`, so a bearer token can no longer be used there. Local and private-network access with tokens is unchanged.
+- A public machine API: AI agents reach the existing board-scoped API over HTTPS on a separate hostname with no VPN, using two independent layers (a Cloudflare Access service token and the existing scoped bearer token). The origin re-verifies the signed Access assertion, the hostname serves only the machine routes, and it has a 3000 requests/minute ceiling. Opt-in through `CANVAS_PUBLIC_HOST`, `CANVAS_MACHINE_API_HOST`, `CANVAS_ACCESS_TEAM_DOMAIN` and `CANVAS_ACCESS_AUD`.
+- An Agent API user guide (Help page) and `scripts/agent-api-smoke.sh`, a credential-safe curl check for a new agent.
 
 This file records user-facing changes to the application. Git remains the authoritative record of code changes.
 
