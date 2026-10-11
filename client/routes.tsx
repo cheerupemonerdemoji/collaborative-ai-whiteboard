@@ -1,4 +1,5 @@
 import { type RouteObject } from 'react-router-dom'
+import { AgentsPage } from './agents/AgentsPage'
 import { RequireAuth } from './auth'
 import { HelpPage } from './help/HelpPage'
 import { Dashboard } from './pages/Dashboard'
@@ -21,6 +22,8 @@ export const appRoutes: RouteObject[] = [
 		children: [
 			{ path: '/', element: <Root /> },
 			{ path: '/boards', element: <Dashboard /> },
+			// Owner-only agent access. A static path, so it is never mistaken for a board by the /:roomId catch-all below.
+			{ path: '/agents', element: <AgentsPage /> },
 			{ path: '/room/:roomId', element: <Room /> },
 			// Keep old shared room links working while moving canonical URLs under /room/.
 			{ path: '/:roomId', element: <Room /> },

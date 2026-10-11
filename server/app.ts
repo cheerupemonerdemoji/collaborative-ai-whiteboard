@@ -36,6 +36,7 @@ import {
 	sessionCookie,
 	SlidingWindowRateLimiter,
 } from './security'
+import { registerAgentAccessRoutes } from './agent-access'
 import { createAccessVerifier } from './access-jwt'
 import { createHostPolicy, hostPolicyFromEnv, isMachineRoute, type HostPolicyConfig } from './host-policy'
 import { authorizeApiToken, type ApiPermission } from './tokens'
@@ -60,6 +61,8 @@ export interface RateLimitOptions {
 	machineRead?: RateLimitSetting
 	/** Every request to the machine hostname, counted before the Access assertion is verified. */
 	machineGate?: RateLimitSetting
+	/** Owner-only agent management routes (list, create, revoke), per signed-in user. */
+	agentAccess?: RateLimitSetting
 }
 
 export interface BuildAppOptions {
@@ -96,6 +99,9 @@ const MACHINE_READ_WINDOW_MS = 60_000
 // were ever bypassed or misconfigured, at the cost of 429s for every agent while a flood lasts.
 const MACHINE_GATE_LIMIT = 3_000
 const MACHINE_GATE_WINDOW_MS = 60_000
+// Agent management is a human, occasional action; the budget exists to bound abuse of the token-store lock.
+const AGENT_ACCESS_LIMIT = 60
+const AGENT_ACCESS_WINDOW_MS = 10 * 60_000
 const AI_EVENT_TYPES = [
 	'ai.requested',
 	'ai.suggestion_generated',
@@ -244,6 +250,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	const assetReadLimiter = limiterFor(options.rateLimits?.assetRead, ASSET_READ_LIMIT, ASSET_READ_WINDOW_MS)
 	const machineReadLimiter = limiterFor(options.rateLimits?.machineRead, MACHINE_READ_LIMIT, MACHINE_READ_WINDOW_MS)
 	const machineGateLimiter = limiterFor(options.rateLimits?.machineGate, MACHINE_GATE_LIMIT, MACHINE_GATE_WINDOW_MS)
+	const agentAccessLimiter = limiterFor(options.rateLimits?.agentAccess, AGENT_ACCESS_LIMIT, AGENT_ACCESS_WINDOW_MS)
 	const hostPolicy = createHostPolicy(options.hostPolicy ?? hostPolicyFromEnv(process.env, (teamDomain, audience) => createAccessVerifier({ teamDomain, audience })))
 	const allowed = allowedOrigins(process.env.CANVAS_ALLOWED_ORIGINS)
 	configureRoomAuditReader((boardId, after) => authService.database.listBoardEventsSince(boardId, after).map((event) => ({
@@ -534,6 +541,23 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		const member = authService.setBoardMemberRole(session.user.id, params.boardId, params.userId, body.role)
 		closeUserRoomSessions(params.boardId, params.userId)
 		return member ? { member } : { ok: true }
+	})
+
+	registerAgentAccessRoutes(app, {
+		// Session cookie only: a machine bearer token can never manage agents.
+		currentUser: (request) => currentSession(request)?.user ?? null,
+		boardRole: (userId, boardId, includeDeleted = false) => authService.getBoardRole(userId, boardId, includeDeleted),
+		recordEvent: (event) => authService.database.insertAccountEvent({
+			eventId: randomUUID(),
+			type: event.type,
+			actorUserId: event.actorUserId,
+			subjectUserId: null,
+			boardId: event.boardId,
+			metadataJson: JSON.stringify(event.metadata),
+			createdAt: new Date().toISOString(),
+		}),
+		allow: (userId) => agentAccessLimiter.allow(`agents:${userId}`),
+		storePath: () => process.env.CANVAS_API_TOKENS_FILE || undefined,
 	})
 
 	app.post('/api/invitations', async (request, reply) => {

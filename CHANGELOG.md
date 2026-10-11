@@ -1,7 +1,4 @@
 # Changelog
-- When `CANVAS_PUBLIC_HOST` is set, the browser hostname refuses requests that carry an `Authorization` header under `/api/`, so a bearer token can no longer be used there. Local and private-network access with tokens is unchanged.
-- A public machine API: AI agents reach the existing board-scoped API over HTTPS on a separate hostname with no VPN, using two independent layers (a Cloudflare Access service token and the existing scoped bearer token). The origin re-verifies the signed Access assertion, the hostname serves only the machine routes, and it has a 3000 requests/minute ceiling. Opt-in through `CANVAS_PUBLIC_HOST`, `CANVAS_MACHINE_API_HOST`, `CANVAS_ACCESS_TEAM_DOMAIN` and `CANVAS_ACCESS_AUD`.
-- An Agent API user guide (Help page) and `scripts/agent-api-smoke.sh`, a credential-safe curl check for a new agent.
 
 This file records user-facing changes to the application. Git remains the authoritative record of code changes.
 
@@ -9,6 +6,12 @@ This file records user-facing changes to the application. Git remains the author
 
 ### Added
 
+- An **Agents** page (`/agents`, linked from the whiteboards page and from each whiteboard you own) for whiteboard owners: pick a whiteboard, see which agents can reach it, create an agent (name, what it may do, how long it lasts), rotate its token, or revoke it. The token is shown once in a dialog that holds it in memory only (never in storage, the address bar or the console) and drops it when closed. Full access, which includes restore, needs an explicit confirmation. A setup checklist covers the agent's side, and it links to the Agent API guide.
+- Owner-only agent management over the signed-in session, on `/api/agent-access`: list the agents that can reach a board, create a one-board agent token (shown once, optional expiry), rotate a token, and revoke it. Machine tokens cannot call these routes, and an owner cannot touch an agent that also reaches a board they do not own. An agent is addressed by a reference that pins the exact credential, so an action can never land on a different agent that reuses its name. Creation, rotation and revocation are written to the account audit trail.
+- The token store now refuses to grow past 100 clients (the limit the request-time reader can parse), for the command-line tool and the routes alike, instead of silently locking every agent out.
+- Optional per-token metadata and expiry: every new client records when it was created, and may carry an expiry after which the server refuses it. See `--expires` and `list --long` in the README.
+- A public machine API: AI agents reach the existing board-scoped API over HTTPS on a separate hostname with no VPN, using two independent layers (a Cloudflare Access service token and the existing scoped bearer token). The origin re-verifies the signed Access assertion, the hostname serves only the machine routes, and it has a 3000 requests/minute ceiling. Opt-in through `CANVAS_PUBLIC_HOST`, `CANVAS_MACHINE_API_HOST`, `CANVAS_ACCESS_TEAM_DOMAIN` and `CANVAS_ACCESS_AUD`.
+- An Agent API user guide (Help page) and `scripts/agent-api-smoke.sh`, a credential-safe curl check for a new agent.
 - Production-hostname support for `whiteboard.example.com` through Cloudflare Access and Tunnel.
 - Loopback-restricted proxy awareness for secure cookies, HSTS, and per-client login throttling.
 - Persistent local accounts, sign-in sessions, account settings, and invitation-based registration. The first account bootstraps the installation administrator and can adopt legacy room databases as owned boards.
@@ -25,6 +28,7 @@ This file records user-facing changes to the application. Git remains the author
 
 ### Changed
 
+- When `CANVAS_PUBLIC_HOST` is set, the browser hostname refuses requests that carry an `Authorization` header under `/api/`, so a bearer token can no longer be used there. Local and private-network access with tokens is unchanged.
 - The public HTTPS hostname uses `Secure; HttpOnly; SameSite=Strict` application session cookies while the private Tailscale fallback remains available.
 - Opening an arbitrary room URL no longer creates an unauthenticated room; the first-use entry point is now `http://your-server/login`.
 - Viewer WebSocket sessions are enforced as read-only by the server.
