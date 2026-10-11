@@ -1,0 +1,79 @@
+/* Agent access page. Built on the dashboard's existing look (account-history.css): same header, buttons, errors and cards. */
+
+.aw-agents .aw-dashboard-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.aw-link-button { display: inline-block; text-decoration: none; padding: 9px 14px; border: 1px solid #4f46e5; border-radius: 8px; background: #4f46e5; color: #fff; font-weight: 680; }
+.aw-link-button:hover { background: #4338ca; }
+
+.aw-agents-board { display: grid; gap: 7px; max-width: 420px; margin: 0 0 22px; color: #334155; font-weight: 650; font-size: 13px; }
+.aw-agents-board select, .aw-agents-form select, .aw-agent-rotate select { min-height: 42px; border: 1px solid #cbd5e1; border-radius: 9px; padding: 9px 11px; background: #fff; color: #172033; font: inherit; }
+.aw-agents-section { margin: 0 0 30px; }
+.aw-agents-section h2 { margin: 0 0 12px; font-size: 20px; }
+.aw-agents-notice { padding: 11px 13px; margin: 0 0 12px; border: 1px solid #bbf7d0; border-radius: 9px; background: #f0fdf4; color: #166534; font-size: 13px; }
+.aw-agents .aw-error { margin: 0 0 12px; }
+
+.aw-agent-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.aw-agent-row { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid #dde3ed; border-radius: 13px; background: #fff; box-shadow: 0 3px 12px rgba(15,23,42,.04); }
+.aw-agent-main { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
+.aw-agent-title { font-size: 16px; overflow-wrap: anywhere; }
+.aw-agent-badges { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.aw-badge { padding: 3px 8px; border-radius: 999px; background: #f1f5f9; color: #475569; font-size: 11px; font-weight: 750; }
+.aw-badge-write { background: #dbeafe; color: #1d4ed8; }
+.aw-badge-history { background: #ede9fe; color: #6d28d9; }
+.aw-badge-restore { background: #fef3c7; color: #92400e; }
+.aw-status { font-size: 12px; font-weight: 700; margin-left: auto; }
+.aw-status-neutral { color: #64748b; }
+.aw-status-ok { color: #166534; }
+.aw-status-warn { color: #b45309; }
+.aw-status-bad { color: #b91c1c; }
+.aw-agent-meta { font-size: 12px; }
+.aw-agent-note { padding: 8px 10px; border-radius: 8px; background: #f8fafc; color: #475569; font-size: 12px; }
+.aw-agent-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.aw-agent-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.aw-agent-confirm { display: grid; gap: 10px; padding: 12px 14px; border: 1px solid #fecaca; border-radius: 10px; background: #fff7f7; font-size: 13px; }
+.aw-agent-confirm.aw-agent-rotate { border-color: #c7d2fe; background: #f5f7ff; }
+.aw-agent-confirm p { margin: 0; }
+.aw-agent-confirm label { display: grid; gap: 6px; font-weight: 650; color: #334155; }
+.aw-agent-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.aw-agent-confirm:not(.aw-agent-rotate) { grid-template-columns: 1fr auto auto; align-items: center; }
+.aw-danger-outline { border-color: #dc2626; color: #b91c1c; }
+
+.aw-agents-form { display: grid; gap: 16px; max-width: 760px; margin: 0 0 30px; padding: 20px; border: 1px solid #c7d2fe; border-radius: 14px; background: #f8f9ff; }
+.aw-agents-form h2 { margin: 0; font-size: 20px; }
+.aw-agents-form > label { display: grid; gap: 7px; color: #334155; font-weight: 650; font-size: 13px; }
+.aw-agents-form input[type="text"], .aw-agents-form input:not([type]), .aw-agents-form input[type="date"] { width: 100%; min-height: 42px; border: 1px solid #cbd5e1; border-radius: 9px; padding: 9px 11px; background: #fff; font: inherit; }
+.aw-agents-form small { color: #64748b; font-weight: 400; }
+.aw-agents-form fieldset { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; }
+.aw-agents-form legend { padding: 0; margin-bottom: 8px; font-weight: 700; font-size: 13px; color: #334155; }
+.aw-agents-choice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid #dde3ed; border-radius: 10px; background: #fff; cursor: pointer; font-weight: 400; }
+.aw-agents-choice input { margin-top: 3px; }
+.aw-agents-choice span { display: grid; gap: 2px; }
+.aw-agents-choice strong { font-size: 14px; color: #172033; }
+.aw-agents-form-actions { display: flex; justify-content: flex-end; }
+.aw-agents-form-actions button:disabled { opacity: .55; cursor: not-allowed; }
+
+.aw-agents-warning { padding: 12px 14px; border: 1px solid #fcd34d; border-radius: 10px; background: #fffbeb; color: #78350f; font-size: 13px; line-height: 1.45; }
+.aw-agents-danger { border-color: #f59e0b; }
+.aw-agents-ack { display: flex; align-items: flex-start; gap: 9px; margin-top: 10px; font-weight: 700; }
+.aw-agents-ack input { margin-top: 3px; }
+
+.aw-agents-checklist { max-width: 760px; margin: 0 0 40px; padding: 14px 18px; border: 1px solid #dde3ed; border-radius: 13px; background: #fff; }
+.aw-agents-checklist summary { cursor: pointer; font-weight: 750; }
+.aw-agents-checklist ol { display: grid; gap: 10px; padding-left: 20px; margin: 12px 0; }
+.aw-agents-checklist code, .aw-token-steps code { padding: 1px 5px; border-radius: 5px; background: #f1f5f9; font-size: 12px; }
+.aw-agents-boardid { display: inline-flex; align-items: center; gap: 8px; margin-left: 8px; }
+
+.aw-token-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(15, 23, 42, .55); }
+.aw-token-dialog { width: min(560px, 100%); max-height: calc(100vh - 40px); overflow: auto; display: grid; gap: 14px; padding: 22px; border-radius: 16px; background: #fff; box-shadow: 0 24px 60px rgba(15, 23, 42, .35); }
+.aw-token-dialog h2, .aw-token-dialog h3, .aw-token-dialog p { margin: 0; }
+.aw-token-dialog h3 { font-size: 14px; }
+.aw-token-value { display: block; padding: 12px 14px; border: 1px solid #cbd5e1; border-radius: 10px; background: #0f172a; color: #e2e8f0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; user-select: all; }
+.aw-token-copy { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; color: #475569; }
+.aw-token-steps { display: grid; gap: 8px; margin: 0; padding-left: 20px; font-size: 13px; }
+.aw-token-actions { display: flex; justify-content: flex-end; }
+
+@media (max-width: 640px) {
+	.aw-agent-confirm:not(.aw-agent-rotate) { grid-template-columns: 1fr; }
+	.aw-status { margin-left: 0; }
+	.aw-agent-actions, .aw-agent-confirm-actions { justify-content: stretch; }
+	.aw-agent-actions button, .aw-agent-confirm-actions button { flex: 1; }
+}

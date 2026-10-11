@@ -22,6 +22,17 @@ These are two separate layers, and both are required:
 
 You do not ask the agent to log in. You give it these values and nothing else.
 
+## Getting a token
+
+If you own the whiteboard, you create the whiteboard token yourself. Open **Agents** from the whiteboards page (or choose **Agents** on a whiteboard you own), pick the whiteboard, and:
+
+1. Give the agent a name you will recognise. It appears in the Agents list. The whiteboard's History lists the agent's changes under a generated identifier (`agent-` followed by twelve letters and digits), not under this name.
+2. Choose what it may do. **Read only** is the safest. **Read and edit** lets it change the whiteboard. **Full access** adds the power to restore the whole whiteboard to an earlier moment, so the page asks you to confirm before it creates one.
+3. Choose how long it should last. The page suggests 90 days; you can pick another length, a date, or no expiry at all.
+4. Select **Create access**. The token is shown **once**. Copy it straight into the agent's secret store, then close the box. It cannot be shown again.
+
+If you do not own the whiteboard, ask its owner. The Cloudflare service credential comes from your administrator, not from this page.
+
 ## Your first request
 
 Read the structured engineering records on a board. Replace `BOARD_ID` with the board's identifier (your administrator or the board owner gives you this):
@@ -78,7 +89,7 @@ curl -sS -X POST "$WHITEBOARD_API_BASE/api/rooms/BOARD_ID/actions" \
 
 Record identifiers always look like `engineering_entity:` followed by lowercase letters, digits, `-` or `_`. Choose your own and keep them unique. The other record actions are `update_entity`, `link_entities`, `unlink_entities`, `record_experiment_result`, `attach_evidence`, and `update_status`. To remove a record from view, set its status to `archived`; nothing is permanently deleted, and History still shows it.
 
-Open the board's History as a person and you will see the change listed under the agent's name, marked as an AI change.
+Open the board's History as a person and you will see the change listed under the agent's identifier (for an agent created on the Agents page, a generated name that is `agent-` followed by twelve letters and digits), marked as an AI change.
 
 ## Boards stay separate
 
@@ -96,9 +107,11 @@ A token is tied to specific boards when it is issued.
 - Service credentials are issued with an expiry. Plan to replace them before they lapse.
 - If a value might have been exposed, tell your administrator straight away. Do not wait to see whether it was misused.
 
-## Revoking an agent
+## Rotating and revoking an agent
 
-Either layer can be switched off on its own, and either one stops the agent immediately:
+On the same **Agents** page you can **Rotate token** to give an agent a fresh token (the old one stops working immediately, so update the agent straight away) or **Revoke** to cut it off for good. An expired agent can be rotated with a new expiry to bring it back.
+
+Either layer can also be switched off on its own, and either one stops the agent immediately:
 
 - **Revoke the whiteboard token.** The agent can still reach the API but is refused everywhere.
 - **Disable the service credential.** The agent is refused before it reaches the whiteboard at all.

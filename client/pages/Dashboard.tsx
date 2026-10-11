@@ -1,5 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { apiRequest, useAuth } from '../auth'
 import { HelpLink } from '../help/HelpPage'
 import { copyText } from '../SharingPanel'
@@ -173,6 +173,7 @@ export function Dashboard() {
 		<header className="aw-dashboard-header">
 			<div className="aw-dashboard-brand"><span className="aw-brand-mark" aria-hidden="true">✦</span><span>Collaborative AI Canvas</span></div>
 			<div className="aw-dashboard-actions">
+				<Link className="aw-help-link" to="/agents">Agents</Link>
 				<HelpLink />
 				<div className="aw-user-menu">
 					<div className="aw-avatar" aria-hidden="true">{initials(user?.displayName ?? '')}</div>
@@ -224,6 +225,7 @@ export function Dashboard() {
 								? board.role === 'owner' ? <button disabled={restoring} onClick={() => void restoreBoard(board.id)}>{restoring ? 'Restoring…' : 'Restore'}</button> : null
 								: <>
 									{board.role === 'owner' ? <button onClick={() => { setRenameId(board.id); setRenameValue(board.name) }}>Rename</button> : null}
+									{board.role === 'owner' ? <button onClick={() => navigate(`/agents?board=${encodeURIComponent(board.id)}`)}>Agents</button> : null}
 									{board.role === 'owner' ? <button onClick={() => setDeleteConfirmId(board.id)}>Delete</button> : null}
 									<button onClick={() => void copyText(`${window.location.origin}/room/${encodeURIComponent(board.id)}`)}>Copy link</button>
 								</>}

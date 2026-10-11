@@ -253,6 +253,8 @@ node scripts/manage-api-tokens.mjs list
 node scripts/manage-api-tokens.mjs revoke alice-ai
 ```
 
+A token can be given an end date with `--expires`, either relative (`30d`, `12h`) or an absolute UTC timestamp, for example `create alice-ai demo read-write --expires 90d`. Without it a token never expires. An expired token is refused exactly like an unknown one, at the exact expiry instant. `list --long` adds the creation time, the expiry, and a status column (`none`, `active`, `expired`, `invalid`). The command needs only a plain `node`; it has no other dependencies.
+
 Access modes are `read` (canvas snapshots), `write` (actions), `read-write` (both), `read-history` (canvas read plus board history), and `full` (read, write, history, and restore). History reading and restoration are separate permissions and are **not** implied by a read/write token.
 
 The client must be on the tailnet. From its own computer it sends `Authorization: Bearer <token>` to:

@@ -34,6 +34,10 @@ Identities:
 | `DELETE /api/boards/:id` | denied | denied | denied | denied | allowed | n/a | n/a | n/a | n/a |
 | `GET /api/boards/:id/members` | denied | denied (404) | allowed | allowed | allowed | n/a | n/a | n/a | n/a |
 | `PUT /api/boards/:id/members/:userId` (set role) | denied | denied | denied | denied | allowed | n/a | n/a | n/a | n/a |
+| `GET /api/agent-access?boardId=:id` (list agents that can reach the board) | denied (401) | denied (404) | denied (403) | denied (403) | allowed (owner of the named board only; shows only the owner's own boards, never hashes or tokens) | denied (401: a bearer is never consulted) | denied (401) | denied (401) | denied (401) |
+| `POST /api/agent-access` (create an agent token for `boardId`, returned once) | denied (401) | denied (404) | denied (403) | denied (403) | allowed (owner of the named board only; token covers exactly that board; optional expiry) | denied (401) | denied (401) | denied (401) | denied (401) |
+| `POST /api/agent-access/:ref/rotate` (replace an agent's token) | denied (401) | denied (404: owns none of its boards) | denied (404) | denied (404) | allowed only if the caller owns EVERY board the agent can reach (403 if only some, 404 if none) | denied (401) | denied (401) | denied (401) | denied (401) |
+| `DELETE /api/agent-access/:ref` (revoke) | denied (401) | denied (404) | denied (404) | denied (404) | allowed only if the caller owns EVERY board the agent can reach (403 if only some, 404 if none) | denied (401) | denied (401) | denied (401) | denied (401) |
 | `POST /api/invitations` (no boardId -- account invite) | denied | denied unless admin | denied unless admin | denied unless admin | denied unless admin | n/a | n/a | n/a | n/a |
 | `POST /api/invitations` (boardId + role -- board invite) | denied | denied | denied | denied | allowed (owner only; `role: 'owner'` always refused, schema + business rule) | n/a | n/a | n/a | n/a |
 | `POST /api/invitations/consume` | allowed (creates account or membership) | -- | -- | -- | -- | n/a | n/a | n/a | n/a |

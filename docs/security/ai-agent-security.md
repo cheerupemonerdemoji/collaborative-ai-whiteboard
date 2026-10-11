@@ -46,6 +46,14 @@ prints a token exactly once at creation time and persists only its SHA-256
 hash. A leaked token file (e.g. a misconfigured backup) does not, by itself,
 yield usable tokens -- the same property session tokens have.
 
+A token may carry an optional expiry. With none it never expires, exactly as
+before. With one, the server refuses the token at the exact expiry instant and
+afterwards, and an expired token is answered like any unknown token, so expiry
+does not reveal that the token once existed. An expiry the server cannot read is
+treated as expired (fail closed), and affects only that one token. Expiry is
+enforced by the server on every request, not by the command-line tool that
+created the token.
+
 ## Validated actions, not arbitrary execution
 
 An AI client never gets a code-execution surface, a shell, or direct
