@@ -106,6 +106,8 @@ each path has its own window so exhausting one does not disable another:
 | `POST /api/invitations` | 30 / hour | user |
 | `POST /api/boards/:id/uploads/:name` | 60 / 15 min | user + board |
 | `GET /api/boards/:id/assets/:name` | 600 / min | user + board |
+| `/api/agent-access` (list, create, rotate, revoke) | 60 / 10 min | user |
+| `POST /api/agent-boards` (machine board creation) | 10 / hour, and 20 / hour for all of one owner's credentials together | credential, and owner |
 
 Exceeding a budget returns HTTP 429 with a generic message. Checkpoint and restore copy a
 whole board snapshot, so they are deliberately tighter than ordinary canvas writes. The
@@ -255,7 +257,7 @@ node scripts/manage-api-tokens.mjs revoke alice-ai
 
 A token can be given an end date with `--expires`, either relative (`30d`, `12h`) or an absolute UTC timestamp, for example `create alice-ai demo read-write --expires 90d`. Without it a token never expires. An expired token is refused exactly like an unknown one, at the exact expiry instant. `list --long` adds the creation time, the expiry, and a status column (`none`, `active`, `expired`, `invalid`). The command needs only a plain `node`; it has no other dependencies.
 
-Access modes are `read` (canvas snapshots), `write` (actions), `read-write` (both), `read-history` (canvas read plus board history), and `full` (read, write, history, and restore). History reading and restoration are separate permissions and are **not** implied by a read/write token.
+Access modes are `read` (canvas snapshots), `write` (actions), `read-write` (both), `read-history` (canvas read plus board history), `read-write-history` (read, write and history, but no restore), and `full` (read, write, history, and restore). History reading and restoration are separate permissions and are **not** implied by a read/write token.
 
 The client must be on the tailnet. From its own computer it sends `Authorization: Bearer <token>` to:
 

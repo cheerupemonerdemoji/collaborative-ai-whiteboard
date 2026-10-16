@@ -3,7 +3,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import {
 	ACCESS_MODES,
+	BOARD_CREATE_PERMISSION,
 	TokenStoreError,
+	createAccountClient,
 	createClient,
 	describeClients,
 	isValidClientName,
@@ -31,6 +33,13 @@ import {
  * routes inside that exemption. Nothing here reads a bearer, so it could not be used to authorise anything, but
  * a structural guarantee beats a reasoned one: /api/agent-access matches neither prefix, so the Origin check
  * always applies, and the board is named in the body or query instead. A test pins this.
+ *
+ * Board-creating agents. POST with kind "board-creator" (and no board) registers a credential that can later
+ * create new boards owned by the caller through POST /api/agent-boards. It is stored in the token file's separate
+ * accountClients collection, starts with no boards, and gives no access to any existing board. GET
+ * ?scope=creators lists the caller's own. Because such a credential can hold zero boards, "the caller owns every
+ * board it can reach" is vacuously true for anyone, so the rule for these is stricter: the caller must BE the
+ * credential's ownerUserId, as well as owning each board it holds.
  *
  * Every mutation goes through server/token-store.mjs, the same lock + backup + atomic-replace path the operator
  * CLI uses. There is deliberately no second writer.
@@ -73,6 +82,13 @@ const createAgentSchema = z.object({
 	expiresAt: expiresAtSchema.optional(),
 }).strict()
 
+const createCreatorSchema = z.object({
+	kind: z.literal('board-creator'),
+	displayName: z.string().trim().min(1).max(80),
+	access: z.enum(Object.keys(ACCESS_MODES) as [AccessMode, ...AccessMode[]]),
+	expiresAt: expiresAtSchema.optional(),
+}).strict()
+
 const rotateAgentSchema = z.object({ expiresAt: expiresAtSchema.optional() }).strict()
 
 export interface AgentAccessDependencies {
@@ -84,7 +100,7 @@ export interface AgentAccessDependencies {
 	 */
 	boardRole(userId: string, boardId: string, includeDeleted?: boolean): 'owner' | 'editor' | 'viewer' | null
 	/** Appends to the account audit trail. Never given token material. */
-	recordEvent(event: { type: string; actorUserId: string; boardId: string; metadata: Record<string, unknown> }): void
+	recordEvent(event: { type: string; actorUserId: string; boardId: string | null; metadata: Record<string, unknown> }): void
 	/** Spends one request from the caller's budget; false means refuse with 429. */
 	allow(userId: string): boolean
 	/** The token file the reader uses, or undefined when machine tokens are not configured. */
@@ -105,6 +121,8 @@ export interface AgentView {
 	expiresAt?: string
 	status: ExpiryStatus
 	createdByYou: boolean
+	/** Present (true) only for a board-creating credential. */
+	canCreateBoards?: boolean
 }
 
 /** An authorisation outcome decided inside the store lock, carrying the HTTP answer. */
@@ -115,6 +133,18 @@ class AgentAccessError extends Error {
 }
 
 const referenceFor = (name: string, fingerprint: string) => `${name}.${fingerprint}`
+
+/** What a rotate or revoke learned, inside the lock, about the record it was authorised against. */
+interface Seen {
+	rooms: string[]
+	displayName?: string
+	creator?: boolean
+}
+
+/** A board-creating credential, as stored: it carries the account-level capability. */
+function isBoardCreator(client: StoredClient): boolean {
+	return Array.isArray(client.accountPermissions) && client.accountPermissions.includes(BOARD_CREATE_PERMISSION)
+}
 
 export function registerAgentAccessRoutes(app: FastifyInstance, deps: AgentAccessDependencies): void {
 	/** Steps 1 and 2. On failure the response has been sent and null is returned. */
@@ -176,21 +206,35 @@ export function registerAgentAccessRoutes(app: FastifyInstance, deps: AgentAcces
 	 * against the record about to change, and writes down what that record was so the audit trail and the response
 	 * describe the record that was actually authorised.
 	 */
-	function authoriseOwnership(userId: string, seen: { rooms: string[]; displayName?: string }): (client: StoredClient) => void {
+	function authoriseOwnership(userId: string, seen: Seen): (client: StoredClient) => void {
 		return (client) => {
 			const rooms = Array.isArray(client.rooms) ? [...new Set(client.rooms.filter((room): room is string => typeof room === 'string'))] : []
 			const owned = ownedRooms(userId, rooms)
-			if (rooms.length === 0 || owned.size === 0) throw new AgentAccessError(404, 'Agent not found')
-			if (owned.size < rooms.length) throw new AgentAccessError(403, 'This agent can also reach boards you do not own. Ask an administrator.')
+			if (isBoardCreator(client)) {
+				// A creator may hold no boards, so owning "all" of them proves nothing: the caller must be its owner.
+				if (client.ownerUserId !== userId) throw new AgentAccessError(404, 'Agent not found')
+				if (owned.size < rooms.length) throw new AgentAccessError(403, 'This agent can also reach boards you do not own. Ask an administrator.')
+				seen.creator = true
+			} else {
+				if (rooms.length === 0 || owned.size === 0) throw new AgentAccessError(404, 'Agent not found')
+				if (owned.size < rooms.length) throw new AgentAccessError(403, 'This agent can also reach boards you do not own. Ask an administrator.')
+			}
 			seen.rooms = rooms
 			if (typeof client.displayName === 'string') seen.displayName = client.displayName
 		}
+	}
+
+	/** One audit row per board the agent reached; a creator with no boards still leaves exactly one (no board). */
+	function auditEach(type: string, userId: string, seen: Seen, metadata: Record<string, unknown>) {
+		const boards: Array<string | null> = seen.rooms.length > 0 ? seen.rooms : [null]
+		for (const boardId of boards) deps.recordEvent({ type, actorUserId: userId, boardId, metadata })
 	}
 
 	function view(client: ClientDetail, userId: string, owned: Set<string>): AgentView {
 		return {
 			ref: referenceFor(client.name, client.fingerprint),
 			name: client.name,
+			...(client.accountPermissions?.includes(BOARD_CREATE_PERMISSION) ? { canCreateBoards: true as const } : {}),
 			...(client.displayName === undefined ? {} : { displayName: client.displayName }),
 			permissions: client.permissions,
 			rooms: client.rooms.filter((room) => owned.has(room)),
@@ -229,12 +273,24 @@ export function registerAgentAccessRoutes(app: FastifyInstance, deps: AgentAcces
 	app.get('/api/agent-access', async (request, reply) => {
 		const userId = begin(request, reply)
 		if (!userId) return reply
-		const boardId = (request.query as { boardId?: unknown }).boardId
+		const query = request.query as { boardId?: unknown; scope?: unknown }
+		if (query.scope === 'creators') {
+			// The caller's own board-creating credentials, including ones that hold no boards yet.
+			const file = requireStore(reply)
+			if (!file) return reply
+			const mine = (await describeClients(file)).filter((client) => client.accountPermissions?.includes(BOARD_CREATE_PERMISSION) && client.ownerUserId === userId)
+			const owned = ownedRooms(userId, mine.flatMap((client) => client.rooms))
+			return { agents: mine.map((client) => view(client, userId, owned)) }
+		}
+		const boardId = query.boardId
 		if (typeof boardId !== 'string' || !isValidRoomId(boardId)) return reply.code(400).send({ error: 'boardId is required' })
 		if (!requireBoardOwner(reply, userId, boardId)) return reply
 		const file = requireStore(reply)
 		if (!file) return reply
-		const clients = (await describeClients(file)).filter((client) => client.rooms.includes(boardId))
+		// A board-creating credential is shown only to its own owner, even where it holds one of their boards.
+		const clients = (await describeClients(file)).filter(
+			(client) => client.rooms.includes(boardId) && (!client.accountPermissions?.includes(BOARD_CREATE_PERMISSION) || client.ownerUserId === userId),
+		)
 		const owned = ownedRooms(userId, clients.flatMap((client) => client.rooms))
 		return { agents: clients.map((client) => view(client, userId, owned)) }
 	})
@@ -242,6 +298,7 @@ export function registerAgentAccessRoutes(app: FastifyInstance, deps: AgentAcces
 	app.post('/api/agent-access', async (request, reply) => {
 		const userId = begin(request, reply)
 		if (!userId) return reply
+		if ((request.body as { kind?: unknown } | null)?.kind === 'board-creator') return createCreator(request, reply, userId)
 		const body = createAgentSchema.parse(request.body)
 		if (!requireBoardOwner(reply, userId, body.boardId)) return reply
 		const file = requireStore(reply)
@@ -284,7 +341,7 @@ export function registerAgentAccessRoutes(app: FastifyInstance, deps: AgentAcces
 		const body = rotateAgentSchema.parse(request.body ?? {})
 		const file = requireStore(reply)
 		if (!file) return reply
-		const seen: { rooms: string[]; displayName?: string } = { rooms: [] }
+		const seen: Seen = { rooms: [] }
 		let rotated
 		try {
 			rotated = await rotateClient({
@@ -297,18 +354,12 @@ export function registerAgentAccessRoutes(app: FastifyInstance, deps: AgentAcces
 		} catch (error) {
 			return failure(reply, error)
 		}
-		for (const boardId of seen.rooms) {
-			deps.recordEvent({
-				type: 'agent.rotated',
-				actorUserId: userId,
-				boardId,
-				metadata: { agent: target.name, previousFingerprint: target.fingerprint, fingerprint: rotated.fingerprint, ...(rotated.expiresAt === undefined ? {} : { expiresAt: rotated.expiresAt }) },
-			})
-		}
+		auditEach('agent.rotated', userId, seen, { agent: target.name, previousFingerprint: target.fingerprint, fingerprint: rotated.fingerprint, ...(seen.creator ? { kind: 'board-creator' } : {}), ...(rotated.expiresAt === undefined ? {} : { expiresAt: rotated.expiresAt }) })
 		return {
 			agent: {
 				ref: referenceFor(rotated.name, rotated.fingerprint),
 				name: rotated.name,
+				...(seen.creator ? { canCreateBoards: true as const } : {}),
 				...(seen.displayName === undefined ? {} : { displayName: seen.displayName }),
 				permissions: rotated.permissions,
 				rooms: rotated.rooms,
@@ -331,35 +382,63 @@ export function registerAgentAccessRoutes(app: FastifyInstance, deps: AgentAcces
 		if (!target) return reply
 		const file = requireStore(reply)
 		if (!file) return reply
-		const seen: { rooms: string[]; displayName?: string } = { rooms: [] }
+		const seen: Seen = { rooms: [] }
 		try {
 			await revokeClient(file, target.name, { fingerprint: target.fingerprint, authorise: authoriseOwnership(userId, seen) })
 		} catch (error) {
 			return failure(reply, error)
 		}
-		for (const boardId of seen.rooms) {
-			deps.recordEvent({ type: 'agent.revoked', actorUserId: userId, boardId, metadata: { agent: target.name, fingerprint: target.fingerprint } })
-		}
+		auditEach('agent.revoked', userId, seen, { agent: target.name, fingerprint: target.fingerprint, ...(seen.creator ? { kind: 'board-creator' } : {}) })
 		return { ok: true }
 	})
+
+	async function createCreator(request: FastifyRequest, reply: FastifyReply, userId: string) {
+		const body = createCreatorSchema.parse(request.body)
+		const file = requireStore(reply)
+		if (!file) return reply
+		let created
+		try {
+			created = await createWithGeneratedName(file, userId, body)
+		} catch (error) {
+			return failure(reply, error)
+		}
+		deps.recordEvent({
+			type: 'agent.created',
+			actorUserId: userId,
+			boardId: null,
+			metadata: { agent: created.name, kind: 'board-creator', fingerprint: created.fingerprint, displayName: body.displayName, access: body.access, ...(created.expiresAt === undefined ? {} : { expiresAt: created.expiresAt }) },
+		})
+		return reply.code(201).send({
+			agent: {
+				ref: referenceFor(created.name, created.fingerprint),
+				name: created.name,
+				canCreateBoards: true,
+				displayName: body.displayName,
+				permissions: created.permissions,
+				rooms: [],
+				sharedWithOtherBoards: false,
+				createdAt: created.createdAt,
+				...(created.expiresAt === undefined ? {} : { expiresAt: created.expiresAt }),
+				status: created.expiresAt === undefined ? 'none' : 'active',
+				createdByYou: true,
+			} satisfies AgentView,
+			// The only time the bearer exists in plaintext. It is not stored, logged or audited.
+			token: created.token,
+		})
+	}
 
 	/**
 	 * Client names share one namespace with the CLI. If the owner chose them, a collision would tell one owner
 	 * that a name exists on someone else's board. So the stored name is generated, and what the owner types is the
 	 * display name. A collision on 48 random bits is retried once and is otherwise treated as a conflict.
 	 */
-	async function createWithGeneratedName(file: string, userId: string, body: z.infer<typeof createAgentSchema>) {
+	async function createWithGeneratedName(file: string, userId: string, body: z.infer<typeof createAgentSchema> | z.infer<typeof createCreatorSchema>) {
 		for (let attempt = 0; ; attempt += 1) {
 			try {
-				return await createClient({
-					file,
-					name: `agent-${randomBytes(AGENT_NAME_BYTES).toString('hex')}`,
-					rooms: [body.boardId],
-					access: body.access,
-					displayName: body.displayName,
-					createdByUserId: userId,
-					...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }),
-				})
+				const name = `agent-${randomBytes(AGENT_NAME_BYTES).toString('hex')}`
+				const common = { file, name, access: body.access, displayName: body.displayName, createdByUserId: userId, ...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }) }
+				if ('kind' in body) return await createAccountClient({ ...common, ownerUserId: userId })
+				return await createClient({ ...common, rooms: [body.boardId] })
 			} catch (error) {
 				if (error instanceof TokenStoreError && error.code === 'duplicate-name' && attempt === 0) continue
 				throw error

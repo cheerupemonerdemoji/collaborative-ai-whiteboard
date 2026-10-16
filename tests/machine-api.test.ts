@@ -133,7 +133,7 @@ describe('machine hostname: only the machine API is served', () => {
 		expect(response.body).not.toContain('SPA-SHELL')
 	})
 
-	it('the allowlist is exactly the set of operations that already accept a board-scoped bearer token', () => {
+	it('the allowlist is the operations that accept a board-scoped bearer token, plus exactly one account-level operation: board creation', () => {
 		expect(MACHINE_ROUTES.map((route) => `${route.method} ${route.pattern.source}`).sort()).toMatchSnapshot()
 		expect(isMachineRoute('GET', '/api/rooms/board-a/semantic-context?includeArchived=true')).toBe(true)
 		expect(isMachineRoute('GET', '/api/rooms/board-a/semantic-context/')).toBe(false)
@@ -141,6 +141,12 @@ describe('machine hostname: only the machine API is served', () => {
 		expect(isMachineRoute('DELETE', '/api/rooms/board-a/canvas')).toBe(false)
 		expect(isMachineRoute('GET', '/api/boards/board-a/history/12/snapshot')).toBe(true)
 		expect(isMachineRoute('GET', '/api/boards/board-a/history/abc/snapshot')).toBe(false)
+		// board creation: exactly this method and path, and nothing that merely resembles it
+		expect(isMachineRoute('POST', '/api/agent-boards')).toBe(true)
+		expect(isMachineRoute('POST', '/api/agent-boards?x=1')).toBe(true)
+		for (const [method, url] of [['GET', '/api/agent-boards'], ['PUT', '/api/agent-boards'], ['DELETE', '/api/agent-boards'], ['POST', '/api/agent-boards/'], ['POST', '/api/agent-boards/x'], ['POST', '/api/agent-boardsx'], ['POST', '/api/agent-access'], ['POST', '/api/boards']] as const) {
+			expect(isMachineRoute(method, url), `${method} ${url}`).toBe(false)
+		}
 	})
 })
 

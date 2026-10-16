@@ -86,6 +86,12 @@ export class SlidingWindowRateLimiter {
 		return true
 	}
 
+	/** Whether `allow` would succeed for `key` right now, without recording an attempt. */
+	wouldAllow(key: string, now = Date.now()): boolean {
+		const cutoff = now - this.windowMs
+		return (this.attempts.get(key) ?? []).filter((time) => time > cutoff).length < this.limit
+	}
+
 	private prune(now: number) {
 		const cutoff = now - this.windowMs
 		for (const [key, values] of this.attempts) {

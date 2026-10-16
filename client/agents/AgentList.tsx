@@ -41,13 +41,15 @@ export function AgentList({ agents, busy, pending, onStart, onCancel, onRotate, 
 				<div className="aw-agent-main">
 					<strong className="aw-agent-title">{title}</strong>
 					<span className="aw-agent-badges">
-						{agent.permissions.map((permission) => <span className={`aw-badge aw-badge-${permission}`} key={permission}>{PERMISSION_LABELS[permission]}</span>)}
+						{agent.canCreateBoards ? <span className="aw-badge aw-badge-create">Creates whiteboards</span> : null}
+							{agent.permissions.map((permission) => <span className={`aw-badge aw-badge-${permission}`} key={permission}>{PERMISSION_LABELS[permission]}</span>)}
 					</span>
 					<span className={`aw-status aw-status-${status.tone}`}>{status.label}</span>
 				</div>
 				<div className="aw-agent-meta aw-muted">
 					{created ? `Created ${created}${agent.createdByYou ? ' by you' : ''}` : 'Created before dates were recorded'}
 					{rotated ? ` · Token replaced ${rotated}` : ''}
+						{agent.canCreateBoards ? ` · ${agent.rooms.length === 1 ? '1 whiteboard' : `${agent.rooms.length} whiteboards`} created so far` : ''}
 				</div>
 				{agent.sharedWithOtherBoards
 					? <div className="aw-agent-note">This agent can also reach whiteboards you do not own, so only an administrator can rotate or revoke it.</div>
@@ -57,7 +59,10 @@ export function AgentList({ agents, busy, pending, onStart, onCancel, onRotate, 
 					: null}
 				{pending?.ref === agent.ref && pending.kind === 'revoke'
 					? <div className="aw-agent-confirm" role="alertdialog" aria-label={`Confirm revoking ${title}`}>
-						<span>Revoke <strong>{title}</strong>? It stops working immediately and cannot be switched back on. You can always create a new one.</span>
+						<span>
+							Revoke <strong>{title}</strong>? It stops working immediately and cannot be switched back on. You can always create a new one.
+							{agent.canCreateBoards ? ' It also loses access to every whiteboard it created. The whiteboards stay yours.' : ''}
+						</span>
 						<button onClick={onCancel}>Cancel</button>
 						<button className="aw-danger-button" disabled={busy} onClick={() => onRevoke(agent.ref)}>{busy ? 'Revoking…' : 'Revoke access'}</button>
 					</div>

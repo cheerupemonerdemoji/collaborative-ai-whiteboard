@@ -113,3 +113,51 @@ describe('API token-store mutations', () => {
 		expect(readdirSync(directory).some((entry) => entry.endsWith('.tmp'))).toBe(false)
 	})
 })
+
+describe('board-creating credentials (accountClients) and the command-line tool', () => {
+	const creator = {
+		name: 'agent-creator', tokenHash: 'c'.repeat(64), ownerUserId: 'user-1', accountPermissions: ['board:create'],
+		permissions: ['read', 'write', 'history'], rooms: [] as string[], createdAt: '2026-10-14T00:00:00.000Z',
+	}
+	function seeded() {
+		const { directory, file } = workspace()
+		writeFileSync(file, `${JSON.stringify({ schemaVersion: 2, clients: [fixture('plain')], accountClients: [creator] }, null, 2)}\n`, { mode: 0o600 })
+		return { directory, file }
+	}
+
+	it('lists them next to ordinary clients, with an empty board column when they hold none yet', () => {
+		const { file } = seeded()
+		const lines = run(file, ['list']).toString().trim().split('\n')
+		expect(lines).toEqual(['plain\tboard-a\tread,write', 'agent-creator\t\tread,write,history'])
+		expect(run(file, ['list', '--long']).toString()).toContain('agent-creator')
+	})
+
+	it('revokes one by name, leaving the collection, the ordinary clients and unknown top-level keys in place', () => {
+		const { file } = seeded()
+		expect(run(file, ['revoke', 'agent-creator']).toString()).toContain('Revoked agent-creator')
+		const store = JSON.parse(readFileSync(file, 'utf8'))
+		expect(store.accountClients).toEqual([])
+		expect(store.schemaVersion).toBe(2)
+		expect(store.clients.map((client: Client) => client.name)).toEqual(['plain'])
+	})
+
+	it('revoking an ordinary client leaves the creators untouched, byte for byte', () => {
+		const { file } = seeded()
+		run(file, ['revoke', 'plain'])
+		const store = JSON.parse(readFileSync(file, 'utf8'))
+		expect(store.accountClients).toEqual([creator])
+		expect(store.clients).toEqual([])
+	})
+
+	it('refuses to create an ordinary client under a creator\'s name', () => {
+		const { file } = seeded()
+		expect(() => run(file, ['create', 'agent-creator', 'board-x', 'read'])).toThrow()
+		expect(JSON.parse(readFileSync(file, 'utf8')).clients.map((client: Client) => client.name)).toEqual(['plain'])
+	})
+
+	it('accepts the read-write-history mode for an ordinary client', () => {
+		const { file } = workspace()
+		run(file, ['create', 'history-agent', 'board-x', 'read-write-history'])
+		expect(readStore(file).clients[0].permissions).toEqual(['read', 'write', 'history'])
+	})
+})

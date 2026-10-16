@@ -11,7 +11,7 @@ import { ApiError } from '../auth'
 
 export type ExpiryStatus = 'none' | 'active' | 'expired' | 'invalid'
 export type Permission = 'read' | 'write' | 'history' | 'restore'
-export type AccessLevel = 'read' | 'read-write' | 'read-history' | 'full' | 'write'
+export type AccessLevel = 'read' | 'read-write' | 'read-history' | 'read-write-history' | 'full' | 'write'
 
 /** One agent as the server describes it to its board's owner. */
 export interface Agent {
@@ -27,6 +27,8 @@ export interface Agent {
 	expiresAt?: string
 	status: ExpiryStatus
 	createdByYou: boolean
+	/** Present (true) only for an agent that can create new whiteboards owned by its owner. */
+	canCreateBoards?: boolean
 }
 
 export interface OwnedBoard {
@@ -47,10 +49,11 @@ export interface AccessLevelOption {
 }
 
 export const ACCESS_LEVELS: readonly AccessLevelOption[] = [
-	{ value: 'read', label: 'Read only', summary: 'Can read this whiteboard and its engineering records. Cannot change anything.', permissions: ['read'] },
+	{ value: 'read', label: 'Read only', summary: 'Can read the whiteboard and its engineering records. Cannot change anything.', permissions: ['read'] },
 	{ value: 'read-write', label: 'Read and edit', summary: 'Can read the whiteboard and make changes. Every change is recorded in History as an AI change.', permissions: ['read', 'write'] },
 	{ value: 'read-history', label: 'Read and view history', summary: 'Can read the whiteboard and look back through its History and checkpoints. Cannot change anything.', permissions: ['read', 'history'] },
-	{ value: 'full', label: 'Full access, including restore', summary: 'Can read, edit, view History, and restore the whole whiteboard to an earlier moment.', permissions: ['read', 'write', 'history', 'restore'], dangerous: true },
+	{ value: 'read-write-history', label: 'Read, edit and view history', summary: 'Can read, make changes and look back through History and checkpoints. Cannot restore.', permissions: ['read', 'write', 'history'] },
+	{ value: 'full', label: 'Full access, including restore', summary: 'Can read, edit, view History, and restore a whiteboard to an earlier moment.', permissions: ['read', 'write', 'history', 'restore'], dangerous: true },
 	{ value: 'write', label: 'Edit only', summary: 'Can make changes but cannot read the whiteboard back. Rarely what you want.', permissions: ['write'] },
 ]
 
@@ -60,6 +63,18 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
 	history: 'History',
 	restore: 'Restore',
 }
+
+/** What a board-creating agent starts with: everything a working agent needs except restore. */
+export const CREATOR_DEFAULT_ACCESS: AccessLevel = 'read-write-history'
+
+/** Shown wherever the owner chooses or reviews the "create new whiteboards" type. Exact wording is deliberate. */
+export const CREATOR_NOTICE = 'This lets the agent create new boards owned by your account. It does not give the agent access to your existing boards.'
+
+export const CREATOR_ACCESS_NOTE = 'These permissions apply to every board the agent creates, and only to those boards.'
+
+export const CREATOR_RESTORE_WARNING =
+	'Restore access is powerful. On every board this agent creates, it will be able to roll the whole board back to an earlier moment, which changes what everyone sees. ' +
+	'Only grant this to an agent you fully trust.'
 
 export const RESTORE_WARNING =
 	'Restore access is powerful. An agent with it can roll this whole whiteboard back to an earlier moment, which changes what everyone sees. ' +
@@ -109,6 +124,8 @@ export function expiresAtFor(choice: ExpiryChoice, customDate: string, now: numb
 /* ------------------------------------------------------------------ create form -- */
 
 export interface CreateForm {
+	/** True for an agent that creates new whiteboards; false for one that works on an existing whiteboard. */
+	creator: boolean
 	displayName: string
 	access: AccessLevel
 	expiry: ExpiryChoice
@@ -118,6 +135,7 @@ export interface CreateForm {
 }
 
 export const INITIAL_CREATE_FORM: CreateForm = {
+	creator: false,
 	displayName: '',
 	access: 'read',
 	expiry: DEFAULT_EXPIRY,
@@ -137,7 +155,16 @@ export function chooseAccess(form: CreateForm, access: AccessLevel): CreateForm 
 	return { ...form, access, restoreAcknowledged: false }
 }
 
-export type Validation = { ok: true; input: { displayName: string; access: AccessLevel; expiresAt?: string } } | { ok: false; message: string }
+export type Validation = { ok: true; input: { displayName: string; access: AccessLevel; expiresAt?: string; creator?: true } } | { ok: false; message: string }
+
+/**
+ * Switching between "an existing whiteboard" and "create new whiteboards" starts the permissions over at that
+ * type's own default and clears the restore acknowledgement, so a tick given for one choice never carries into
+ * the other.
+ */
+export function chooseCreator(form: CreateForm, creator: boolean): CreateForm {
+	return { ...form, creator, access: creator ? CREATOR_DEFAULT_ACCESS : INITIAL_CREATE_FORM.access, restoreAcknowledged: false }
+}
 
 /** The single place that decides whether the create form may be submitted, and with what. */
 export function validateCreate(form: CreateForm, now: number = Date.now()): Validation {
@@ -150,7 +177,7 @@ export function validateCreate(form: CreateForm, now: number = Date.now()): Vali
 	}
 	const expiry = expiresAtFor(form.expiry, form.customDate, now)
 	if (!expiry.ok) return expiry
-	return { ok: true, input: { displayName, access: form.access, ...(expiry.expiresAt === undefined ? {} : { expiresAt: expiry.expiresAt }) } }
+	return { ok: true, input: { displayName, access: form.access, ...(expiry.expiresAt === undefined ? {} : { expiresAt: expiry.expiresAt }), ...(form.creator ? { creator: true as const } : {}) } }
 }
 
 /* ------------------------------------------------------------------------ rotate -- */
@@ -230,7 +257,8 @@ export function friendlyError(error: unknown, fallback: string): string {
 export interface RevealedToken {
 	kind: 'created' | 'rotated'
 	agentTitle: string
-	boardName: string
+	/** The whiteboard the token is for; null for an agent that creates its own whiteboards. */
+	boardName: string | null
 	token: string
 }
 

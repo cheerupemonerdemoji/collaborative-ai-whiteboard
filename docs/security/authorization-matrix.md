@@ -19,6 +19,7 @@ Identities:
   membership row for the board in question.
 - **viewer** / **editor** / **owner** -- a valid application session with
   that board-membership role.
+- **board-creating credential** -- a machine credential stored in the token file's separate `accountClients` collection with the account-level capability `board:create` and an `ownerUserId`. It is not a board role and not one of the four scopes: it is the *only* thing that lets a machine call `POST /api/agent-boards`, and it grants no access to any board that already exists. Once it has created a board it holds that board with its configured permissions like any other token.
 - **machine read / write / history / restore** -- a bearer token
   (`server/tokens.ts`) scoped to the board and holding that one permission.
   A token's permissions are independent and not implied by each other:
@@ -38,6 +39,10 @@ Identities:
 | `POST /api/agent-access` (create an agent token for `boardId`, returned once) | denied (401) | denied (404) | denied (403) | denied (403) | allowed (owner of the named board only; token covers exactly that board; optional expiry) | denied (401) | denied (401) | denied (401) | denied (401) |
 | `POST /api/agent-access/:ref/rotate` (replace an agent's token) | denied (401) | denied (404: owns none of its boards) | denied (404) | denied (404) | allowed only if the caller owns EVERY board the agent can reach (403 if only some, 404 if none) | denied (401) | denied (401) | denied (401) | denied (401) |
 | `DELETE /api/agent-access/:ref` (revoke) | denied (401) | denied (404) | denied (404) | denied (404) | allowed only if the caller owns EVERY board the agent can reach (403 if only some, 404 if none) | denied (401) | denied (401) | denied (401) | denied (401) |
+| `POST /api/agent-access` with `kind: "board-creator"` (register a board-creating credential; no board named, returned once) | denied (401) | allowed (any signed-in account registers its own; the credential's owner is the caller) | allowed (same) | allowed (same) | allowed (same) | denied (401) | denied (401) | denied (401) | denied (401) |
+| `GET /api/agent-access?scope=creators` (the caller's own board-creating credentials, including ones with no boards yet) | denied (401) | allowed (own only) | allowed (own only) | allowed (own only) | allowed (own only) | denied (401) | denied (401) | denied (401) | denied (401) |
+| rotate / revoke a board-creating credential (`POST .../rotate`, `DELETE .../:ref`) | denied (401) | allowed only if the caller IS the credential's `ownerUserId` (otherwise 404) | same | same | same, and the caller must still own every board it holds (403 otherwise) | denied (401) | denied (401) | denied (401) | denied (401) |
+| `POST /api/agent-boards` (machine board creation; machine hostname only) | denied (401: no bearer) | denied (401: a session cookie is never consulted) | denied (401) | denied (401) | denied (401) | denied (403: an ordinary board token) | denied (403) | denied (403) | denied (403) |
 | `POST /api/invitations` (no boardId -- account invite) | denied | denied unless admin | denied unless admin | denied unless admin | denied unless admin | n/a | n/a | n/a | n/a |
 | `POST /api/invitations` (boardId + role -- board invite) | denied | denied | denied | denied | allowed (owner only; `role: 'owner'` always refused, schema + business rule) | n/a | n/a | n/a | n/a |
 | `POST /api/invitations/consume` | allowed (creates account or membership) | -- | -- | -- | -- | n/a | n/a | n/a | n/a |
