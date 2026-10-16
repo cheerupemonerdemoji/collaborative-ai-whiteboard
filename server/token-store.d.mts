@@ -8,7 +8,7 @@
 
 export type Permission = 'read' | 'write' | 'history' | 'restore'
 
-export type AccessMode = 'read' | 'write' | 'read-write' | 'read-history' | 'full'
+export type AccessMode = 'read' | 'write' | 'read-write' | 'read-history' | 'read-write-history' | 'full'
 
 /**
  * The most clients one store may hold; `createClient` refuses the one past it
@@ -16,6 +16,15 @@ export type AccessMode = 'read' | 'write' | 'read-write' | 'read-history' | 'ful
  * fails to parse there, which would lock out every agent.
  */
 export const MAX_CLIENTS: number
+
+/** The most boards one credential may hold: the request-time reader's own per-client cap. */
+export const MAX_ROOMS_PER_CLIENT: number
+
+/** The most board-creating credentials one store may hold (policy; they live in `accountClients`). */
+export const MAX_ACCOUNT_CLIENTS: number
+
+/** The one account-level capability: create new boards owned by the credential's `ownerUserId`. */
+export const BOARD_CREATE_PERMISSION: 'board:create'
 
 /** Access-mode shorthands shared by the CLI and the HTTP routes. */
 export const ACCESS_MODES: Readonly<Record<AccessMode, readonly Permission[]>>
@@ -36,6 +45,11 @@ export interface StoredClient {
 /** The store as it exists on disk. Unknown top-level keys are preserved. */
 export interface TokenStoreData {
 	clients: StoredClient[]
+	/**
+	 * Board-creating credentials. Separate from `clients` because they start with no boards, and a `clients`
+	 * record with no rooms would make every reader reject the whole file. Older builds ignore this key.
+	 */
+	accountClients?: StoredClient[]
 	[key: string]: unknown
 }
 
@@ -59,6 +73,10 @@ export type TokenStoreErrorCode =
 	| 'stale-reference'
 	| 'duplicate-name'
 	| 'not-found'
+	| 'no-capability'
+	| 'expired'
+	| 'room-limit'
+	| 'rollback-failed'
 
 /**
  * Carries a stable machine-readable `code` so HTTP routes can map failures to
@@ -67,6 +85,8 @@ export type TokenStoreErrorCode =
  */
 export class TokenStoreError extends Error {
 	readonly code: TokenStoreErrorCode
+	/** Set on `rollback-failed`: the id of the board that could not be removed. */
+	boardId?: string
 	constructor(code: TokenStoreErrorCode, message: string)
 }
 
@@ -106,6 +126,9 @@ export function resolveStorePath(env?: NodeJS.ProcessEnv): string
  * array `clients` is rejected as `invalid-store`.
  */
 export function readStore(file: string): Promise<{ data: TokenStoreData; source: string }>
+
+/** The `accountClients` collection, or an empty array when the store has none. */
+export function accountClientsOf(data: TokenStoreData): StoredClient[]
 
 /** Clients as they are safe to return to a caller: never the stored hash. */
 export function summariseClients(data: TokenStoreData): ClientSummary[]
@@ -161,6 +184,57 @@ export interface CreateClientResult {
 
 /** Register a new client and return its one-time bearer token. */
 export function createClient(request: CreateClientRequest): Promise<CreateClientResult>
+
+export interface CreateAccountClientRequest {
+	file: string
+	name: string
+	/** The account that will own every board this credential creates. Recorded once; never changes. */
+	ownerUserId: string
+	/** Permissions the credential holds on every board it creates. */
+	access: string
+	expiresAt?: string | Date
+	displayName?: string
+	createdByUserId?: string
+	now?: Date
+}
+
+export interface CreateAccountClientResult {
+	/** Plaintext bearer. Returned exactly once; never persisted or logged. */
+	token: string
+	name: string
+	ownerUserId: string
+	permissions: Permission[]
+	fingerprint: string
+	createdAt: string
+	expiresAt?: string
+}
+
+/**
+ * Register a board-creating credential in `accountClients`. It starts with no boards and grants no access to any
+ * board that already exists; names are unique across `clients` and `accountClients`.
+ */
+export function createAccountClient(request: CreateAccountClientRequest): Promise<CreateAccountClientResult>
+
+export interface GrantNewBoardRequest {
+	file: string
+	name: string
+	/** Pins the exact credential that authenticated the request; a rotated or replaced one is `stale-reference`. */
+	fingerprint: string
+	/**
+	 * Creates the board. Synchronous; runs inside the mutation lock after the capability, expiry and room-cap
+	 * checks, and receives the freshly read credential record. Returns the new board's id.
+	 */
+	prepare: (client: StoredClient) => string
+	/** Removes the board `prepare` created if the grant could not be persisted. Synchronous. */
+	rollback: (boardId: string) => void
+	now?: Date
+}
+
+/**
+ * Create a board for a board-creating credential and add it to the credential's rooms under one lock: board
+ * first, then grant, with `rollback` as compensation. See the implementation for the failure analysis.
+ */
+export function grantNewBoard(request: GrantNewBoardRequest): Promise<{ boardId: string; rooms: string[] }>
 
 /**
  * Pins a name-addressed action to one exact record and lets the caller veto it
@@ -226,6 +300,9 @@ export interface ClientDetail extends ClientSummary {
 	displayName?: string
 	createdByUserId?: string
 	rotatedAt?: string
+	/** Present only on board-creating credentials. */
+	accountPermissions?: string[]
+	ownerUserId?: string
 	/** `clientFingerprint` of the stored credential, for addressing this exact record. */
 	fingerprint: string
 	status: ExpiryStatus

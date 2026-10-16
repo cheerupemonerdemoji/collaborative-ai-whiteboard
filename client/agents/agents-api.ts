@@ -28,6 +28,23 @@ export async function listAgents(boardId: string): Promise<Agent[]> {
 	return agents
 }
 
+/** The caller's own board-creating agents, including ones that have not created a whiteboard yet. */
+export async function listBoardCreators(): Promise<Agent[]> {
+	const { agents } = await apiRequest<{ agents: Agent[] }>('/api/agent-access?scope=creators')
+	return agents
+}
+
+export interface CreateBoardCreatorInput {
+	displayName: string
+	access: AccessLevel
+	expiresAt?: string
+}
+
+/** Registers an agent that can create new whiteboards owned by the caller. It is given no existing whiteboard. */
+export function createBoardCreator(input: CreateBoardCreatorInput): Promise<AgentWithToken> {
+	return apiRequest<AgentWithToken>('/api/agent-access', { method: 'POST', body: JSON.stringify({ kind: 'board-creator', ...input }) })
+}
+
 export interface CreateAgentInput {
 	boardId: string
 	displayName: string

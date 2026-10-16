@@ -52,6 +52,7 @@ export const ACCESS_MODES = {
 	write: ['write'],
 	'read-write': ['read', 'write'],
 	'read-history': ['read', 'history'],
+	'read-write-history': ['read', 'write', 'history'],
 	full: ['read', 'write', 'history', 'restore'],
 }
 
@@ -71,6 +72,19 @@ export class TokenStoreError extends Error {
 const CLIENT_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const ROOM_ID = /^[A-Za-z0-9_-]{1,80}$/
 const MAX_ROOMS = 50
+
+/** The most boards one credential may hold: the request-time reader's own per-client cap. */
+export const MAX_ROOMS_PER_CLIENT = MAX_ROOMS
+
+/**
+ * The most board-creating credentials one store may hold. These live in the separate top-level `accountClients`
+ * collection (see `createAccountClient`), which older readers do not parse, so this is a policy cap, not a reader
+ * limit like MAX_CLIENTS.
+ */
+export const MAX_ACCOUNT_CLIENTS = 20
+
+/** The one account-level capability that exists: create new boards owned by `ownerUserId`. */
+export const BOARD_CREATE_PERMISSION = 'board:create'
 
 /**
  * The most clients one store may hold. This is the reader's limit, not a policy choice: server/tokens.ts parses
@@ -154,6 +168,25 @@ function serialise(data) {
 	return `${JSON.stringify(data, null, 2)}\n`
 }
 
+/**
+ * Board-creating credentials live in a second top-level collection, `accountClients`, never in `clients`.
+ *
+ * Why not in `clients`: that collection's invariant (enforced by every reader since the forward-compatibility
+ * floor) is that each record has at least one room, and a single record that breaks it makes the WHOLE file
+ * fail to parse, locking out every agent silently. A creator legitimately starts with no boards. A build that does
+ * not know this collection ignores it (readers use `.passthrough()`, mutation code edits the raw object in place),
+ * so on an older build a creator credential simply does not authenticate and ordinary clients are unaffected.
+ *
+ * Names are unique across BOTH collections: the name is the identity that History and the audit trail record.
+ */
+export function accountClientsOf(data) {
+	return Array.isArray(data.accountClients) ? data.accountClients : []
+}
+
+function allClients(data) {
+	return [...data.clients, ...accountClientsOf(data)]
+}
+
 function emptyStore() {
 	return { clients: [] }
 }
@@ -201,7 +234,7 @@ export async function readStore(file) {
 
 /** Clients as they are safe to return to a caller: never the stored hash. */
 export function summariseClients(data) {
-	return data.clients.map((client) => ({
+	return allClients(data).map((client) => ({
 		name: client.name,
 		rooms: client.rooms,
 		permissions: client.permissions,
@@ -382,7 +415,7 @@ export async function createClient(request) {
 	const token = randomBytes(32).toString('base64url')
 	const tokenHash = createHash('sha256').update(token).digest('hex')
 	await mutateStore(file, (data) => {
-		if (data.clients.some((client) => client.name === name)) {
+		if (allClients(data).some((client) => client.name === name)) {
 			throw new TokenStoreError('duplicate-name', `Client ${name} already exists; revoke it first to rotate the token`)
 		}
 		if (data.clients.length >= MAX_CLIENTS) {
@@ -403,6 +436,59 @@ export async function createClient(request) {
 }
 
 /**
+ * Register a board-creating credential in `accountClients` and return its one-time bearer token.
+ *
+ * It starts with NO boards (`rooms: []`), which is exactly why it is not stored in `clients`. `access` chooses the
+ * permissions it will hold on every board it later creates (the same permissions apply to all of them, as for any
+ * client). `ownerUserId` is the account that will own those boards; it is recorded once and never changes, and it
+ * grants no access to any board that already exists. A successful `grantNewBoard` is what adds boards to `rooms`.
+ */
+export async function createAccountClient(request) {
+	const { file, name } = request
+	if (!isValidClientName(name)) {
+		throw new TokenStoreError('invalid-name', 'Client name must match [A-Za-z0-9_-]{1,64}')
+	}
+	if (!isAccessMode(request.access)) {
+		throw new TokenStoreError('invalid-access', `Access mode must be one of ${Object.keys(ACCESS_MODES).join(', ')}`)
+	}
+	const ownerUserId = normaliseCreator(request.ownerUserId)
+	if (ownerUserId === undefined) throw new TokenStoreError('invalid-creator', 'An owner user id is required')
+	const now = request.now ?? new Date()
+	const createdAt = now.toISOString()
+	const expiresAt = normaliseExpiry(request.expiresAt, now)
+	const displayName = normaliseDisplayName(request.displayName)
+	const createdByUserId = normaliseCreator(request.createdByUserId)
+	const permissions = [...ACCESS_MODES[request.access]]
+	const token = randomBytes(32).toString('base64url')
+	const tokenHash = createHash('sha256').update(token).digest('hex')
+	await mutateStore(file, (data) => {
+		if (data.accountClients !== undefined && !Array.isArray(data.accountClients)) {
+			throw new TokenStoreError('invalid-store', 'Invalid token file')
+		}
+		if (allClients(data).some((client) => client.name === name)) {
+			throw new TokenStoreError('duplicate-name', `Client ${name} already exists; revoke it first to rotate the token`)
+		}
+		if (accountClientsOf(data).length >= MAX_ACCOUNT_CLIENTS) {
+			throw new TokenStoreError('store-full', `The token store already holds the maximum of ${MAX_ACCOUNT_CLIENTS} board-creating agents; revoke one first`)
+		}
+		data.accountClients ??= []
+		data.accountClients.push({
+			name,
+			tokenHash,
+			ownerUserId,
+			accountPermissions: [BOARD_CREATE_PERMISSION],
+			permissions,
+			rooms: [],
+			createdAt,
+			...(expiresAt === undefined ? {} : { expiresAt }),
+			...(displayName === undefined ? {} : { displayName }),
+			...(createdByUserId === undefined ? {} : { createdByUserId }),
+		})
+	})
+	return { token, name, ownerUserId, permissions, fingerprint: clientFingerprint(tokenHash), createdAt, ...(expiresAt === undefined ? {} : { expiresAt }) }
+}
+
+/**
  * Find the record(s) a name-addressed action applies to, INSIDE the mutation lock, and run the caller's
  * authorisation against exactly those records.
  *
@@ -416,7 +502,7 @@ export async function createClient(request) {
  * that returns anything at all is rejected outright.
  */
 function locateClients(data, name, options) {
-	const named = data.clients.filter((client) => client.name === name)
+	const named = allClients(data).filter((client) => client.name === name)
 	if (named.length === 0) throw new TokenStoreError('not-found', `Client ${name} not found`)
 	let targets = named
 	if (options.fingerprint !== undefined) {
@@ -445,6 +531,10 @@ export async function revokeClient(file, name, options = {}) {
 	await mutateStore(file, (data) => {
 		const targets = locateClients(data, name, options)
 		data.clients = data.clients.filter((client) => !targets.includes(client))
+		// Only touch accountClients when a target lives there, so a store without the key stays byte-for-byte as it was.
+		if (targets.some((client) => accountClientsOf(data).includes(client))) {
+			data.accountClients = data.accountClients.filter((client) => !targets.includes(client))
+		}
 	})
 }
 
@@ -493,6 +583,99 @@ export async function rotateClient(request) {
 	return { token, name, fingerprint: clientFingerprint(tokenHash), rotatedAt: now.toISOString(), ...rotated }
 }
 
+/**
+ * Create one board for a board-creating credential and add it to that credential's `rooms`, as a single
+ * operation under the mutation lock.
+ *
+ * The account database and this file cannot share a transaction, so the order is chosen for the failure mode
+ * that is safe and visible: BOARD FIRST, THEN GRANT.
+ *
+ *   lock -> read -> pin the credential (name + fingerprint) -> capability, expiry and room-cap checks
+ *        -> `prepare(client)` creates the board (synchronous, atomic in its own database)
+ *        -> add the room, back up, atomic rename
+ *
+ * - If anything before `prepare` refuses, no board exists and the store is untouched.
+ * - If `prepare` throws, nothing was written here, so the store is untouched.
+ * - If persisting fails after `prepare`, the store is re-read first. A grant that is in fact on disk (the failure
+ *   came after the rename) is a success and the board is kept. Otherwise `rollback(boardId)` removes the board
+ *   (a soft delete: there is no hard delete) and the original error is rethrown. If the rollback itself fails the
+ *   error is `rollback-failed` carrying `boardId`: the worst outcome is then an empty board the owner can see,
+ *   with no grant to the agent. It is never a grant to a board that does not exist.
+ *
+ * Re-checking the room cap here, inside the lock, immediately before the board is created, is what makes the cap
+ * race-free: two concurrent requests serialise on the lock and the second sees the first's room. `prepare`
+ * receives the freshly read record, so the owner it uses is the one that is actually stored, and `rollback` is
+ * called with the id `prepare` returned. Both must be synchronous.
+ */
+export async function grantNewBoard(request) {
+	const { file, name, fingerprint, prepare, rollback } = request
+	if (!isValidClientName(name)) {
+		throw new TokenStoreError('invalid-name', 'Client name must match [A-Za-z0-9_-]{1,64}')
+	}
+	if (typeof fingerprint !== 'string' || fingerprint.length === 0) throw new TypeError('fingerprint is required')
+	if (typeof prepare !== 'function' || typeof rollback !== 'function') throw new TypeError('prepare and rollback are required')
+	const now = request.now ?? new Date()
+	const release = await acquireMutationLock(file)
+	try {
+		const { data, source } = await readStore(file)
+		if (data.accountClients !== undefined && !Array.isArray(data.accountClients)) {
+			throw new TokenStoreError('invalid-store', 'Invalid token file')
+		}
+		const named = allClients(data).filter((client) => client.name === name)
+		if (named.length === 0) throw new TokenStoreError('not-found', `Client ${name} not found`)
+		const targets = accountClientsOf(data).filter((client) => client.name === name && clientFingerprint(client.tokenHash) === fingerprint)
+		if (targets.length === 0) throw new TokenStoreError('stale-reference', `Client ${name} has changed since it was read`)
+		if (named.length !== 1 || targets.length !== 1) {
+			throw new TokenStoreError('duplicate-name', `Client ${name} appears more than once; revoke the duplicates first`)
+		}
+		const [client] = targets
+		if (!Array.isArray(client.accountPermissions) || !client.accountPermissions.includes(BOARD_CREATE_PERMISSION)) {
+			throw new TokenStoreError('no-capability', `Client ${name} may not create boards`)
+		}
+		const expiry = evaluateExpiry(client.expiresAt, now.getTime())
+		if (expiry === 'expired' || expiry === 'invalid') throw new TokenStoreError('expired', `Client ${name} has expired`)
+		if (!Array.isArray(client.rooms)) throw new TokenStoreError('invalid-store', 'Invalid token file')
+		if (client.rooms.length >= MAX_ROOMS) {
+			throw new TokenStoreError('room-limit', `Client ${name} already holds the maximum of ${MAX_ROOMS} boards`)
+		}
+		const boardId = prepare(client)
+		if (typeof boardId !== 'string' || !isValidRoomId(boardId) || client.rooms.includes(boardId)) {
+			if (typeof boardId === 'string') rollback(boardId)
+			throw new TypeError('prepare must synchronously return the id of a newly created board')
+		}
+		client.rooms.push(boardId)
+		try {
+			await backUpStore(file, source)
+			await writeStoreAtomically(file, data)
+		} catch (error) {
+			if (await grantIsPersisted(file, name, fingerprint, boardId)) return { boardId, rooms: [...client.rooms] }
+			try {
+				rollback(boardId)
+			} catch (rollbackError) {
+				const failure = new TokenStoreError('rollback-failed', 'The new board could not be removed after the grant failed')
+				failure.boardId = boardId
+				failure.cause = error
+				throw failure
+			}
+			throw error
+		}
+		return { boardId, rooms: [...client.rooms] }
+	} finally {
+		await release()
+	}
+}
+
+async function grantIsPersisted(file, name, fingerprint, boardId) {
+	try {
+		const { data } = await readStore(file)
+		return accountClientsOf(data).some(
+			(client) => client.name === name && clientFingerprint(client.tokenHash) === fingerprint && Array.isArray(client.rooms) && client.rooms.includes(boardId),
+		)
+	} catch {
+		return false
+	}
+}
+
 /** Read-only listing. Takes no lock and never returns hashes. */
 export async function listClients(file) {
 	const { data } = await readStore(file)
@@ -508,7 +691,7 @@ export async function listClients(file) {
  */
 export async function describeClients(file, now = Date.now()) {
 	const { data } = await readStore(file)
-	return data.clients.map((client) => ({
+	return allClients(data).map((client) => ({
 		name: client.name,
 		rooms: client.rooms,
 		permissions: client.permissions,
@@ -517,6 +700,8 @@ export async function describeClients(file, now = Date.now()) {
 		...(typeof client.displayName === 'string' ? { displayName: client.displayName } : {}),
 		...(typeof client.createdByUserId === 'string' ? { createdByUserId: client.createdByUserId } : {}),
 		...(typeof client.rotatedAt === 'string' ? { rotatedAt: client.rotatedAt } : {}),
+		...(Array.isArray(client.accountPermissions) ? { accountPermissions: client.accountPermissions.filter((p) => typeof p === 'string') } : {}),
+		...(typeof client.ownerUserId === 'string' ? { ownerUserId: client.ownerUserId } : {}),
 		fingerprint: clientFingerprint(client.tokenHash),
 		status: evaluateExpiry(client.expiresAt, now),
 	}))

@@ -33,6 +33,10 @@ If you own the whiteboard, you create the whiteboard token yourself. Open **Agen
 
 If you do not own the whiteboard, ask its owner. The Cloudflare service credential comes from your administrator, not from this page.
 
+### An agent that creates its own whiteboards
+
+On the same page, choose **Create new whiteboards** instead of an existing one. The page says what this means: *the agent can create new boards owned by your account, and it does not get access to your existing boards.* Choose its permissions (`Read, edit and view history` is suggested; restore stays behind the same confirmation), a lifetime and a name, then create it. You are not asked to pick a whiteboard, and no whiteboard is created for you. The permissions you choose apply to every board that agent creates, and only to those boards.
+
 ## Your first request
 
 Read the structured engineering records on a board. Replace `BOARD_ID` with the board's identifier (your administrator or the board owner gives you this):
@@ -71,8 +75,32 @@ The operations an agent can reach are:
 | `GET /api/boards/BOARD_ID/checkpoints` | `history` |
 | `POST /api/boards/BOARD_ID/checkpoints` | `history` and `write` |
 | `POST /api/boards/BOARD_ID/restore` | `restore` |
+| `POST /api/agent-boards` | a board-creating token (see below) |
 
 Everything else is closed to agents: signing in, accounts, invitations, board lists and sharing, uploads and attachments, structured evidence tables, live editing sessions, and the web app itself. An agent works with evidence through the ordinary records only; it cannot create evidence tables.
+
+## Creating a whiteboard
+
+A board-creating token can make a new whiteboard. This is the only operation that is not tied to a board you name, because the board does not exist yet:
+
+```bash
+curl -sS -X POST "$WHITEBOARD_API_BASE/api/agent-boards" \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $WHITEBOARD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Gearbox test plan"}'
+```
+
+The body holds a `name` and nothing else; you cannot choose the board's identifier. A successful reply is `201` with the new board's `boardId`, its `name` and a `url` for people to open it. The reply never contains a token. The new board belongs to the person who set the agent up, and the same token can read and change it straight away, with the permissions it was issued with and no others.
+
+What this does **not** do:
+
+- It gives no access to any board that already existed, including that person's own boards.
+- An ordinary board token cannot do it (`403`), and neither can anyone using a browser session: it is a machine-only operation on the agent API address.
+- It is limited. One token can create 10 boards an hour, all of one person's tokens together 20 an hour, and one token can hold at most 50 boards in its lifetime (deleted boards still count). Past a limit the reply is `429`, or `409` for the 50-board limit, and nothing is created.
+
+If something goes wrong after the board is made but before the token can be given it, the new board is removed and the reply is an error, so you are not left with a board the agent cannot use.
 
 ## Writing a record
 
@@ -96,6 +124,7 @@ Open the board's History as a person and you will see the change listed under th
 A token is tied to specific boards when it is issued.
 
 - A token for Board A cannot read or change Board B. The reply is the same as for a board that does not exist, so an agent cannot discover which other boards are there.
+- A board-creating token starts with no boards, and gets exactly the boards it creates itself. Permission to create boards is never permission to use the owner's other boards.
 - A token never grants more than its scopes. A read-only token cannot write, a token without `history` cannot read History, and a token without `restore` cannot restore.
 - Records on one board cannot refer to evidence or attachments from another board.
 
@@ -126,6 +155,7 @@ Revoking one agent does not affect any other agent or any person using the white
 | Cloudflare's own sign-in or "access denied" page (HTML) | The request was stopped before the whiteboard. The service credential is missing or not accepted. |
 | `401` | The whiteboard token is missing, wrong, revoked, or not valid for this board. |
 | `403` | The token is valid for this board but does not carry the scope this operation needs. |
+| `403` with "Origin not allowed" | A `POST` carried a token the server does not accept (wrong, revoked, expired, or not valid for this board or operation). Check the token; the same request with a good token is not affected. |
 | `404` with "Not found" | This operation is not available to agents. Check the path and method against the table above. |
 | `429` | The agent is going too fast. Wait and retry more slowly. |
 | `409` | The board changed while the agent was working. Read it again and retry. |

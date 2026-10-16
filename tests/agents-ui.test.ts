@@ -479,8 +479,11 @@ describe('the create form, as first shown', () => {
 		const out = render()
 
 		for (const level of ACCESS_LEVELS) { expect(out).toContain(level.label); expect(out).toContain(level.summary) }
-		expect((out.match(/type="radio"/g) ?? []).length).toBe(ACCESS_LEVELS.length)
+		// every access level is a radio, plus the two-way choice of what the agent is for (existing whiteboard or new ones)
+		expect((out.match(/type="radio" name="access"/g) ?? []).length).toBe(ACCESS_LEVELS.length)
+		expect((out.match(/type="radio" name="agent-kind"/g) ?? []).length).toBe(2)
 		expect(out).toContain('<input type="radio" name="access" checked="" value="read"/>')
+		expect(out).toContain('<input type="radio" name="agent-kind" checked="" value="existing"/>')
 		expect(out).not.toContain(RESTORE_WARNING)
 	})
 
@@ -598,7 +601,7 @@ describe('the page', () => {
 		expect(out).toContain('Loading your whiteboards…')
 		expect(out).toContain('href="/boards"')
 		expect(out).toContain('href="/help"')
-		expect(out).toMatch(/Only a whiteboard(?:'|&#x27;)s owner can do this/)
+		expect(out).toMatch(/For an existing whiteboard, only its owner can do this/)
 		expect(out).not.toContain('aw-token-dialog')
 	})
 

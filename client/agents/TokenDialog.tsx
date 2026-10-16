@@ -30,7 +30,9 @@ export function TokenDialog({ revealed, onDismiss }: { revealed: RevealedToken; 
 	return <div className="aw-token-backdrop">
 		<div className="aw-token-dialog" role="dialog" aria-modal="true" aria-labelledby="aw-token-title">
 			<h2 id="aw-token-title">{rotated ? 'New token issued' : 'Agent access created'}</h2>
-			<p><strong>{revealed.agentTitle}</strong> on <strong>{revealed.boardName}</strong></p>
+			<p>{revealed.boardName === null
+				? <><strong>{revealed.agentTitle}</strong>, which can create new whiteboards owned by your account</>
+				: <><strong>{revealed.agentTitle}</strong> on <strong>{revealed.boardName}</strong></>}</p>
 			<div className="aw-agents-warning" role="note">
 				<strong>Copy this token now.</strong> It is shown only once and cannot be recovered.
 				{rotated ? ' The previous token has already stopped working.' : ''} If you lose it, rotate the agent to get a new one.

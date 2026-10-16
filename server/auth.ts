@@ -85,6 +85,11 @@ export interface SessionGrant extends CurrentSession {
 	token: string
 }
 
+/** Marks an operation as performed by a machine client (named here) on behalf of the board's owner. */
+export interface AgentActor {
+	agent?: string
+}
+
 export interface BoardSummary {
 	id: string
 	name: string
@@ -533,7 +538,12 @@ export class AuthService {
 		return this.database.listBoardsForUser(userId, includeDeleted).map((board) => publicBoard(board, board.role))
 	}
 
-	createBoard(userId: string, name: string, requestedId?: string): BoardSummary {
+	/**
+	 * `options.agent` records that a machine client, not the owner, performed the creation: the audit row then has no
+	 * actor user (the machine client is the actor) and names the agent, while `userId` still becomes the board's
+	 * owner. The human owner is never recorded as having personally created a board an agent created.
+	 */
+	createBoard(userId: string, name: string, requestedId?: string, options?: AgentActor): BoardSummary {
 		this.requireActiveUser(userId)
 		const id = validateBoardId(requestedId ?? randomUUID())
 		const cleanName = cleanBoardName(name)
@@ -543,7 +553,8 @@ export class AuthService {
 			const board: BoardRecord = { id, name: cleanName, ownerUserId: userId, createdAt: at, updatedAt: at, deletedAt: null }
 			this.database.insertBoard(board)
 			this.database.upsertBoardMember({ boardId: id, userId, role: 'owner', createdAt: at, updatedAt: at })
-			this.event('board.created', userId, userId, id, { name: cleanName }, at)
+			if (options?.agent) this.event('board.created', null, userId, id, { name: cleanName, actorKind: 'agent', agentName: options.agent }, at)
+			else this.event('board.created', userId, userId, id, { name: cleanName }, at)
 			return publicBoard(board, 'owner')
 		})
 	}
@@ -598,14 +609,15 @@ export class AuthService {
 		return publicBoard({ ...board, name: cleanName, updatedAt: at }, membership.role)
 	}
 
-	deleteBoard(userId: string, boardId: string): BoardSummary {
+	deleteBoard(userId: string, boardId: string, options?: AgentActor & { reason?: string }): BoardSummary {
 		const { board, membership } = this.requireBoardMember(userId, boardId, true)
 		if (membership.role !== 'owner') throw new AuthError('forbidden', 'Only the board owner can delete this board', 403)
 		if (board.deletedAt) return publicBoard(board, membership.role)
 		const at = this.now().toISOString()
 		this.database.transaction(() => {
 			this.database.setBoardDeleted(board.id, at, at)
-			this.event('board.deleted', userId, userId, board.id, {}, at)
+			if (options?.agent) this.event('board.deleted', null, userId, board.id, { actorKind: 'agent', agentName: options.agent, ...(options.reason ? { reason: options.reason } : {}) }, at)
+			else this.event('board.deleted', userId, userId, board.id, {}, at)
 		})
 		return publicBoard({ ...board, updatedAt: at, deletedAt: at }, membership.role)
 	}

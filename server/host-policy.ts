@@ -97,6 +97,8 @@ export const MACHINE_ROUTES: readonly MachineRoute[] = [
 	{ method: 'GET', pattern: new RegExp(`^/api/boards/${ID}/checkpoints$`) },
 	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/checkpoints$`) },
 	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/restore$`) },
+	// Account-level, not board-scoped: a board-creating credential makes a new board it owns nothing of yet.
+	{ method: 'POST', pattern: /^\/api\/agent-boards$/ },
 ]
 
 export function isMachineRoute(method: string, url: string): boolean {

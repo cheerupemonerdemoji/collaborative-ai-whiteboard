@@ -37,9 +37,10 @@ import {
 	SlidingWindowRateLimiter,
 } from './security'
 import { registerAgentAccessRoutes } from './agent-access'
+import { registerAgentBoardsRoutes } from './agent-boards'
 import { createAccessVerifier } from './access-jwt'
 import { createHostPolicy, hostPolicyFromEnv, isMachineRoute, type HostPolicyConfig } from './host-policy'
-import { authorizeApiToken, type ApiPermission } from './tokens'
+import { authenticateBoardCreator, authorizeApiToken, type ApiPermission } from './tokens'
 import { evidenceTableArtifactId, EVIDENCE_TABLE_LIMITS, evidenceTableSchema, summaryForTable } from '../shared/evidence-tables'
 import type { HistoryEvent, HistoryEventFilters, HistorySource, HistoryEventType } from '../shared/history'
 
@@ -63,6 +64,10 @@ export interface RateLimitOptions {
 	machineGate?: RateLimitSetting
 	/** Owner-only agent management routes (list, create, revoke), per signed-in user. */
 	agentAccess?: RateLimitSetting
+	/** Boards a single board-creating credential may create per window. */
+	agentBoardCredential?: RateLimitSetting
+	/** Boards all of one owner's board-creating credentials together may create per window. */
+	agentBoardOwner?: RateLimitSetting
 }
 
 export interface BuildAppOptions {
@@ -102,6 +107,11 @@ const MACHINE_GATE_WINDOW_MS = 60_000
 // Agent management is a human, occasional action; the budget exists to bound abuse of the token-store lock.
 const AGENT_ACCESS_LIMIT = 60
 const AGENT_ACCESS_WINDOW_MS = 10 * 60_000
+// Machine board creation is rare and consequential. Both budgets are in-process (they reset when the service
+// restarts); the durable bound is the 50-boards-per-credential cap in the token store.
+const AGENT_BOARD_CREDENTIAL_LIMIT = 10
+const AGENT_BOARD_OWNER_LIMIT = 20
+const AGENT_BOARD_WINDOW_MS = 60 * 60_000
 const AI_EVENT_TYPES = [
 	'ai.requested',
 	'ai.suggestion_generated',
@@ -127,6 +137,8 @@ const createBoardSchema = z.object({
 	name: z.string().min(1).max(120),
 	id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional(),
 }).strict()
+// Machine board creation: the same name rules as the human route, but the board id is never client-chosen.
+const agentBoardSchema = createBoardSchema.omit({ id: true })
 const renameBoardSchema = z.object({ name: z.string().min(1).max(120) }).strict()
 const memberRoleSchema = z.object({ role: z.enum(['editor', 'viewer']).nullable() }).strict()
 const createInvitationSchema = z.object({
@@ -251,6 +263,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	const machineReadLimiter = limiterFor(options.rateLimits?.machineRead, MACHINE_READ_LIMIT, MACHINE_READ_WINDOW_MS)
 	const machineGateLimiter = limiterFor(options.rateLimits?.machineGate, MACHINE_GATE_LIMIT, MACHINE_GATE_WINDOW_MS)
 	const agentAccessLimiter = limiterFor(options.rateLimits?.agentAccess, AGENT_ACCESS_LIMIT, AGENT_ACCESS_WINDOW_MS)
+	const agentBoardCredentialLimiter = limiterFor(options.rateLimits?.agentBoardCredential, AGENT_BOARD_CREDENTIAL_LIMIT, AGENT_BOARD_WINDOW_MS)
+	const agentBoardOwnerLimiter = limiterFor(options.rateLimits?.agentBoardOwner, AGENT_BOARD_OWNER_LIMIT, AGENT_BOARD_WINDOW_MS)
 	const hostPolicy = createHostPolicy(options.hostPolicy ?? hostPolicyFromEnv(process.env, (teamDomain, audience) => createAccessVerifier({ teamDomain, audience })))
 	const allowed = allowedOrigins(process.env.CANVAS_ALLOWED_ORIGINS)
 	configureRoomAuditReader((boardId, after) => authService.database.listBoardEventsSince(boardId, after).map((event) => ({
@@ -386,6 +400,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		if (typeof authorization === 'string' && /^Bearer [A-Za-z0-9_-]{32,128}$/.test(authorization)) {
 			const boardId = boardIdFromPath(request.url)
 			if (boardId && bearerPermissions(request, boardId)) return
+			// The one account-level machine route. Exactly this method and path, and only for a genuine board-creating
+			// credential: any other bearer, path or method falls through to the refusal below.
+			if (request.method === 'POST' && request.url.split('?')[0] === '/api/agent-boards' && authenticateBoardCreator(authorization).kind === 'ok') return
 		}
 		return reply.code(403).send({ error: 'Origin not allowed' })
 	})
@@ -557,6 +574,35 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			createdAt: new Date().toISOString(),
 		}),
 		allow: (userId) => agentAccessLimiter.allow(`agents:${userId}`),
+		storePath: () => process.env.CANVAS_API_TOKENS_FILE || undefined,
+	})
+
+	registerAgentBoardsRoutes(app, {
+		// Bearer only. This route never reads the session cookie.
+		authenticate: (header) => authenticateBoardCreator(header),
+		bodySchema: agentBoardSchema,
+		spend: (clientName, ownerUserId) => {
+			const credentialKey = `credential:${clientName}`
+			const ownerKey = `owner:${ownerUserId}`
+			if (!agentBoardCredentialLimiter.wouldAllow(credentialKey)) return 'credential-limit'
+			if (!agentBoardOwnerLimiter.wouldAllow(ownerKey)) return 'owner-limit'
+			agentBoardCredentialLimiter.allow(credentialKey)
+			agentBoardOwnerLimiter.allow(ownerKey)
+			return 'ok'
+		},
+		createBoard: (ownerUserId, name, agentName) => authService.createBoard(ownerUserId, name, undefined, { agent: agentName }),
+		removeBoard: (ownerUserId, boardId, agentName) => {
+			authService.deleteBoard(ownerUserId, boardId, { agent: agentName, reason: 'grant-not-persisted' })
+		},
+		recordEvent: (event) => authService.database.insertAccountEvent({
+			eventId: randomUUID(),
+			type: event.type,
+			actorUserId: event.actorUserId,
+			subjectUserId: null,
+			boardId: event.boardId,
+			metadataJson: JSON.stringify(event.metadata),
+			createdAt: new Date().toISOString(),
+		}),
 		storePath: () => process.env.CANVAS_API_TOKENS_FILE || undefined,
 	})
 

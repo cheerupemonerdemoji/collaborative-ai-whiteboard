@@ -133,6 +133,22 @@ revocation and rollback: `docs/development/public-machine-api.md`. Implementatio
 `server/host-policy.ts`, `server/access-jwt.ts`, tests in `tests/machine-api.test.ts`
 and `tests/access-jwt.test.ts`.
 
+## Board-creating credentials
+
+An owner can register an agent that creates its own boards. The credential is a different shape from a board token and
+is stored apart from them, in the token file's `accountClients` collection, so that "has at least one board" stays an
+invariant of the ordinary `clients` collection (a record with no boards there would make every reader reject the whole
+file). Its capability is `board:create`, it names an `ownerUserId`, and it begins with no boards. `POST /api/agent-boards`
+accepts only a strict `{name}` body, creates the board for the owner through the same service the human route uses, and
+adds exactly that board to the credential in the same locked operation. The credential never gains access to a board that
+existed before, including its owner's. The human `POST /api/boards` does not accept it, and it is not accepted on the
+browser hostname.
+
+Older builds do not read `accountClients`: on a rollback these credentials stop authenticating (they fail closed) while
+ordinary clients carry on unchanged. Limits: 10 creations an hour per credential, 20 an hour per owner across
+credentials, 50 boards per credential for life. Creation and any compensation are audited with the machine client as the
+actor and never with token material.
+
 ## What is explicitly out of scope for V1
 
 - No autonomous background agents; every action is a synchronous request an

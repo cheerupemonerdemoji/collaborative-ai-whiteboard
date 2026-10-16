@@ -131,6 +131,23 @@ authenticates as a human session and cannot be used to bypass board
 membership -- it has its *own* scoped grant instead. See
 `docs/security/ai-agent-security.md`.
 
+#### Board-creating credentials
+
+A second kind of machine credential can create new boards (`POST /api/agent-boards`). It is recorded in the token
+file's separate `accountClients` collection with an `ownerUserId` and the account-level capability `board:create`,
+and it starts with no boards. It authenticates only on the machine hostname (after Cloudflare Access), never with a
+session cookie, and grants nothing on any board that existed before it. Each board it creates is owned by the named
+human, is added to that credential's boards in the same locked token-store operation (board first, then grant, with a
+soft-delete compensation if the grant cannot be persisted), and carries the permissions the owner configured.
+
+What bounds the damage if one of these tokens leaks: it can make at most 10 boards an hour (all of one owner's creators
+together 20), at most 50 over its life (deleted boards still count), and only for its owner; the owner revokes it from
+the Agents page and the boards remain theirs. Residual risk, accepted for V1 and recorded as known limitations: the
+hourly budgets are in-process and reset when the service restarts, so the durable bound is the 50-board cap; there is
+**no durable aggregate quota per owner** across credentials; and a rolled-back creation leaves a soft-deleted board row
+and its audit events (there is no hard delete). Audit rows for these actions have no actor user (the machine client is
+the actor) and carry the agent's name and the owner's id, never a token or hash.
+
 ### 8. Engineering-entity semantic layer
 
 The Chibi Robo semantic actions (`create_entity`, `update_entity`,
