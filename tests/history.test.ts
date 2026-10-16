@@ -60,6 +60,7 @@ describe('history migrations and immutable storage', () => {
 			'history:0004-coalescing-fragments',
 			'history:0005-account-audit-projection',
 			'history:0006-retention-gate',
+			'layout:0001-measurements',
 		])
 		expect(database.pragma('user_version', { simple: true })).toBe(73)
 	})

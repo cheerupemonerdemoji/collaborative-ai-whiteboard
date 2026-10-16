@@ -68,6 +68,7 @@ The operations an agent can reach are:
 | `GET /api/health` | nothing beyond the service credential |
 | `GET /api/rooms/BOARD_ID/canvas` | `read` |
 | `GET /api/rooms/BOARD_ID/semantic-context` | `read` |
+| `GET /api/rooms/BOARD_ID/layout` | `read` |
 | `POST /api/rooms/BOARD_ID/actions` | `write` |
 | `POST /api/rooms/BOARD_ID/ai/events` | `write` |
 | `GET /api/boards/BOARD_ID/history` | `history` |
@@ -118,6 +119,90 @@ curl -sS -X POST "$WHITEBOARD_API_BASE/api/rooms/BOARD_ID/actions" \
 Record identifiers always look like `engineering_entity:` followed by lowercase letters, digits, `-` or `_`. Choose your own and keep them unique. The other record actions are `update_entity`, `link_entities`, `unlink_entities`, `record_experiment_result`, `attach_evidence`, and `update_status`. To remove a record from view, set its status to `archived`; nothing is permanently deleted, and History still shows it.
 
 Open the board's History as a person and you will see the change listed under the agent's identifier (for an agent created on the Agents page, a generated name that is `agent-` followed by twelve letters and digits), marked as an AI change.
+
+## Laying out a board
+
+An agent that draws on the canvas should place things where they fit, and check that they do. Two things make that possible: a layout read that says where everything really is, and layout actions that place shapes and report what they achieved.
+
+### Reading the layout
+
+```bash
+curl -sS "$WHITEBOARD_API_BASE/api/rooms/BOARD_ID/layout" \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $WHITEBOARD_TOKEN"
+```
+
+This needs the `read` scope. Unlike the canvas read (which lists only top-level shapes), the layout read includes shapes nested inside frames and groups, with everything in **page coordinates**. Each shape has its `id`, `type`, `bounds` (`x`, `y`, `w`, `h`), `rotation`, `parentId`, `index` and `zIndex`, and arrows add their endpoints and what they connect. It never returns text or other properties. Narrow it with `?ids=shape:a,shape:b`, `?types=geo,text` or `?pageId=page:...`; a page too large to return whole is refused with a message rather than cut short.
+
+The response also gives the default `gap` (64) and counts of how many bounds are measured, declared and estimated.
+
+### How far to trust a size
+
+Every shape says where its size came from and whether it is verified:
+
+| `boundsSource` | Meaning | `verification` |
+|---|---|---|
+| `measured` | A browser reported the size it actually drew, for content that has not changed since. | `verified` |
+| `declared` | The shape's own width and height, as boxes, frames and images carry. | `verified` (see below) |
+| `estimated` | Worked out from the text, because nothing better exists. Text wraps and fonts differ, so it can be wrong. | `unverified` |
+
+Text and notes are estimated until someone with the board open in a browser has measured them. A box whose label may not fit in it is declared but `unverified`. Treat an estimate as a good guess that leans toward taking more room, never as exact. A measurement is dropped automatically when the text changes (the shape then shows `measurementStale`).
+
+### Layout actions
+
+Send these in the same `actions` list as everything else; they use the same `write` scope, rate limits and History as any other change, and a request that fails changes nothing.
+
+| Action | What it does |
+|---|---|
+| `place_below` | `{id, targetId, gap?, align?}` puts a shape under another, then slides it further down if something is in the way. `align` is `start`, `center` or `end`. |
+| `place_right_of` | The same, to the right of the target. |
+| `find_free_region` | `{width, height, near?, direction?, gap?}` finds clear space and **changes nothing**. `direction` is `below`, `right` or `any`. |
+| `align` | `{ids, axis}` aligns shapes on `left`, `center-x`, `right`, `top`, `center-y` or `bottom`. |
+| `distribute` | `{ids, direction, gap?}` spaces three or more shapes evenly, `horizontal` or `vertical`. |
+| `row` | `{ids, gap?, align?, x?, y?, avoidCollisions?}` lines shapes up left to right in the order given. |
+| `stack` | The same top to bottom. |
+| `grid` | `{ids, columns, gap?, columnGap?, rowGap?, x?, y?, avoidCollisions?}` arranges shapes row by row. |
+
+The default spacing is 64 px everywhere unless you pass a `gap`. A block placed by `row`, `stack` or `grid` is moved as a whole past anything it would land on, unless you set `avoidCollisions` to `false`. Layout actions refuse locked shapes, arrows (an arrow follows the shapes it connects), and a container together with its own child.
+
+`create_text` accepts an optional `width`. With it, the text wraps at that width, which makes its size far more predictable; without it, each line stays on one line however long it is. A single text is limited to 500 characters.
+
+### What comes back
+
+When a request contains layout actions, the reply gains a `layout` object:
+
+```json
+{
+  "layout": {
+    "status": "partially_unverified",
+    "gap": 64,
+    "results": [{ "index": 1, "tool": "place_below", "moved": [{ "id": "shape:todo", "dx": 0, "dy": 480 }],
+      "verification": { "status": "partially_unverified", "items": [], "overlaps": [], "tooClose": [],
+        "spacing": { "requested": 64, "minimum": 64, "ok": true },
+        "alignment": { "axis": null, "maxDeviation": null, "ok": true },
+        "unverified": [{ "id": "shape:todo", "reason": "estimated" }] } }],
+    "final": {},
+    "arrows": [{ "id": "shape:link", "bound": true, "attached": true, "startGap": 0, "endGap": 0 }]
+  }
+}
+```
+
+- `items` lists each touched shape's resulting bounds, `boundsSource` and `verification`.
+- `overlaps` and `tooClose` list anything that intersects, or sits closer than asked. Containers and their children, and arrows attached to their shapes, are not counted.
+- `spacing` and `alignment` say whether the gap and alignment you asked for were actually achieved.
+- `unverified` names shapes whose placement depends on an estimate (`estimated`), a label that may overflow (`label-may-overflow`), or a measurement that no longer matches (`measurement-stale`).
+- `final` repeats the check for the whole request, and `arrows` reports whether each arrow touching a moved shape still meets it.
+
+`status` is the worst of these: `overlaps`, then `partially_unverified`, then `verified`. **`partially_unverified` is not a pass.** It means nothing overlapped according to the sizes known, but at least one of them is an estimate, so a clean result cannot be promised. Prefer boxes with declared sizes, give text a `width`, and leave a generous gap around estimated text. Once someone opens the board in a browser the sizes become measured, and asking for the same placement again reports `verified`. A measurement never moves anything by itself, and your layout is not changed behind your back.
+
+### Arrows
+
+`connect_shapes` now draws a real tldraw arrow attached to both shapes, so it follows them when a person drags one in the browser. Arrows created before this change are static, but when a layout action (or `move_shape` or `resize_shape`) moves a box they connect, the server redraws them. Arrows a person drew, and their attachments, are never altered.
+
+### Sizes the server cannot see
+
+If a person adds a large block of text in their browser, the server has no way to know its drawn size until a browser reports it. Run `find_free_region` or a layout action and read `unverified` rather than assuming. Prefer placing new work in free space (`find_free_region`) over placing it next to content you did not make.
 
 ## Boards stay separate
 

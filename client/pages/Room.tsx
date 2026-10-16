@@ -7,6 +7,7 @@ import { apiRequest, useAuth } from '../auth'
 import { copyText, SharingPanel } from '../SharingPanel'
 import { getBookmarkPreview } from '../getBookmarkPreview'
 import { HistoryPanel } from '../history/HistoryPanel'
+import { attachMeasurementReporter } from '../layout/attach-measurement-reporter'
 import { createMultiplayerAssetStore } from '../multiplayerAssetStore'
 import { SemanticInspectorPanel } from '../semantic/SemanticInspectorPanel'
 import { HelpLink } from '../help/HelpPage'
@@ -46,6 +47,7 @@ export function Room() {
 	const [shareOpen, setShareOpen] = useState(false)
 	const [linkCopied, setLinkCopied] = useState(false)
 	const editorRef = useRef<Editor | null>(null)
+	const stopReporterRef = useRef<(() => void) | null>(null)
 
 	const assets = useMemo(() => createMultiplayerAssetStore(roomId), [roomId])
 	const store = useSync({ uri: `${window.location.origin}/api/connect/${roomId}`, assets, schema: syncSchema })
@@ -69,6 +71,19 @@ export function Room() {
 		const editor = editorRef.current
 		if (editor) editor.updateInstanceState({ isReadonly: board?.role === 'viewer' })
 	}, [board?.role])
+
+	// People who can edit report the sizes their browser measured for text and notes, so agents can lay the board out against
+	// real sizes. Optional and silent: it never edits the board, and viewers (whom the server would refuse) do not run it.
+	const syncReporter = useCallback(() => {
+		stopReporterRef.current?.()
+		stopReporterRef.current = null
+		const editor = editorRef.current
+		if (editor && (board?.role === 'owner' || board?.role === 'editor')) stopReporterRef.current = attachMeasurementReporter(editor, roomId)
+	}, [board?.role, roomId])
+	useEffect(() => {
+		syncReporter()
+		return () => { stopReporterRef.current?.(); stopReporterRef.current = null }
+	}, [syncReporter])
 
 	/** Read the live server clock immediately before the restore request. */
 	const getExpectedClock = useCallback(async () => {
@@ -154,6 +169,7 @@ export function Room() {
 						editorRef.current = editor
 						editor.updateInstanceState({ isReadonly: isViewer })
 						editor.registerExternalAssetHandler('url', getBookmarkPreview)
+						syncReporter()
 					}}
 				/>
 			</section>

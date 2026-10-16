@@ -59,7 +59,9 @@ created the token.
 An AI client never gets a code-execution surface, a shell, or direct
 filesystem/database access. Every mutation an AI can request -- visual
 (`create_shape`, `create_text`, `create_arrow`, `update_text`, `move_shape`,
-`resize_shape`, `delete_shape`, `connect_shapes`) or semantic
+`resize_shape`, `delete_shape`, `connect_shapes`), layout (`place_below`,
+`place_right_of`, `find_free_region`, `align`, `distribute`, `row`, `stack`,
+`grid`) or semantic
 (`create_entity`, `update_entity`, `link_entities`, `unlink_entities`,
 `record_experiment_result`, `attach_evidence`, `update_status`) -- is a
 closed, Zod-validated action type (`shared/ai.ts`, `shared/entities.ts`).

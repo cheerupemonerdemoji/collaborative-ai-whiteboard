@@ -149,6 +149,23 @@ const migrations: readonly HistoryMigration[] = [
 			END;
 		`,
 	},
+	{
+		// Sizes that only a browser can measure (text and note labels), reported by connected clients and tied to the
+		// content they measured by a fingerprint. Derived, disposable data: it lives outside the tldraw document so
+		// reporting a measurement never creates a history event or moves the document clock, and a build that does not
+		// know this table simply ignores it.
+		id: 'layout:0001-measurements',
+		sql: `
+			CREATE TABLE layout_measurements (
+				shape_id TEXT PRIMARY KEY,
+				w REAL NOT NULL,
+				h REAL NOT NULL,
+				fp TEXT NOT NULL,
+				reported_at INTEGER NOT NULL,
+				reported_by TEXT NOT NULL
+			);
+		`,
+	},
 ]
 
 export function migrateHistoryDatabase(database: Database.Database): void {
