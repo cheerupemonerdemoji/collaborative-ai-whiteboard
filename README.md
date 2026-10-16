@@ -280,6 +280,14 @@ Example request body for three native circles and connecting arrows:
 
 The standard-library [Python bridge](examples/canvas_client.py) exposes `get_canvas(room)` and `apply_actions(room, actions, expected_clock)`. Set `CANVAS_API_TOKEN` in that local process's environment, then import those functions into the person's AI program. Native WebSocket room sync updates human browsers automatically. The API is not a general command-execution or model-hosting endpoint.
 
+## Agent layout
+
+Agents can read where every shape on a board really is (`GET /api/rooms/:roomId/layout`, including shapes nested in frames) and
+place work with layout actions on the same `/actions` endpoint (`place_below`, `place_right_of`, `find_free_region`, `align`,
+`distribute`, `row`, `stack`, `grid`). Every layout reply reports resulting bounds, how each size was obtained (`measured` by a
+browser, `declared` by the shape, or `estimated`), overlaps, spacing, alignment and unverified text; an estimate is never reported as exact.
+Geometry and placement live in dependency-free `shared/layout*.ts`. See `docs/user-guide/agent-api.md` ("Laying out a board").
+
 ## Chibi Robo semantic layer
 
 On top of the plain visual canvas, boards can optionally hold a small,

@@ -148,6 +148,20 @@ hourly budgets are in-process and reset when the service restarts, so the durabl
 and its audit events (there is no hard delete). Audit rows for these actions have no actor user (the machine client is
 the actor) and carry the agent's name and the owner's id, never a token or hash.
 
+### 7a. Layout reads, layout actions and browser measurements
+
+`GET /api/rooms/:id/layout` is a read-scope machine route returning bounds and authority only (never text or props), capped at
+1,500 shapes and refused rather than truncated beyond that. Layout actions are members of the same closed, Zod-validated action union and
+run in the same room transaction as every other action, so they inherit board-scoped authorization, the `write` scope, rate limits and
+History attribution; they refuse locked shapes, arrows and a container moved with its child, and a failure rolls the whole request back.
+
+The one new input from a client is the browser's measurement report (`POST /api/boards/:id/layout-measurements`). It is the only
+route here that accepts data an attacker could try to forge, so: it requires a signed-in session with write access to the board (a machine
+bearer is refused, viewers get 403, non-members 404), is rate limited per user and board, accepts only text and note shapes, and trusts a
+size only when the reported fingerprint equals one the **server recomputes** from the shape's current content. A forged or outdated
+report is counted as stale and discarded. The worst a malicious editor can do is mis-state a size for a shape they could already edit or delete,
+which makes layout reads for that shape wrong, not insecure. Sizes are bounded (1–50,000) and never written into the tldraw document.
+
 ### 8. Engineering-entity semantic layer
 
 The Chibi Robo semantic actions (`create_entity`, `update_entity`,

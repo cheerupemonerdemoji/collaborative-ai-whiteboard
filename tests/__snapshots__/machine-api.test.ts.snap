@@ -7,6 +7,7 @@ exports[`machine hostname: only the machine API is served > the allowlist is the
   "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/history\\/\\d{1,15}\\/snapshot$",
   "GET ^\\/api\\/health$",
   "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/canvas$",
+  "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/layout$",
   "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/semantic-context$",
   "POST ^\\/api\\/agent-boards$",
   "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/checkpoints$",

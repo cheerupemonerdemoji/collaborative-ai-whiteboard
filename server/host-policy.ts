@@ -91,6 +91,7 @@ export const MACHINE_ROUTES: readonly MachineRoute[] = [
 	{ method: 'GET', pattern: new RegExp(`^/api/rooms/${ID}/canvas$`) },
 	{ method: 'POST', pattern: new RegExp(`^/api/rooms/${ID}/actions$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/rooms/${ID}/semantic-context$`) },
+	{ method: 'GET', pattern: new RegExp(`^/api/rooms/${ID}/layout$`) },
 	{ method: 'POST', pattern: new RegExp(`^/api/rooms/${ID}/ai/events$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/boards/${ID}/history$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/boards/${ID}/history/\\d{1,15}/snapshot$`) },

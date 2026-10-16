@@ -52,6 +52,9 @@ Identities:
 | `POST /api/rooms/:id/actions` (visual actions) | denied | denied | denied (403) -- server-enforced, not just UI | allowed | allowed | denied (no `write` scope) | allowed | denied | denied |
 | `POST /api/rooms/:id/actions` (semantic actions: create/update/link/unlink/record_experiment_result/attach_evidence/update_status) | denied | denied | denied (403) | allowed | allowed | denied | allowed | denied | denied |
 | `GET /api/rooms/:id/semantic-context` | denied | denied | allowed | allowed | allowed | allowed | denied | denied | denied |
+| `GET /api/rooms/:id/layout` (page-space geometry, bounds only) | denied | denied (404) | allowed | allowed | allowed | allowed | denied (no `read` scope) | denied | denied |
+| `POST /api/rooms/:id/actions` (layout actions: place_below/place_right_of/find_free_region/align/distribute/row/stack/grid) | denied | denied | denied (403) | allowed | allowed | denied (no `write` scope) | allowed | denied | denied |
+| `POST /api/boards/:id/layout-measurements` (browser-reported text/note sizes; human session only) | denied (401) | denied (404) | denied (403) | allowed | allowed | denied (machine bearer refused) | denied | denied | denied |
 | `POST /api/rooms/:id/ai/events` | denied | denied | denied | allowed | allowed | denied | allowed | denied | denied |
 | `GET /api/boards/:id/history` | denied | denied | allowed | allowed | allowed | denied | denied | allowed | denied |
 | `GET /api/boards/:id/history/:eventId/snapshot` | denied | denied | allowed | allowed | allowed | denied | denied | allowed | denied |

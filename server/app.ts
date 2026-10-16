@@ -9,7 +9,7 @@ import type { RawData, WebSocket } from 'ws'
 import { z, ZodError } from 'zod'
 import { AuthError, AuthService, type CurrentSession, type LegacyBoardInput } from './auth'
 import type { BoardRole } from './auth-db'
-import { applyRoomActions, CanvasApiError, readRoomCanvas, readRoomSemantics } from './canvas-api'
+import { applyRoomActions, CanvasApiError, readRoomCanvas, readRoomLayout, readRoomSemantics } from './canvas-api'
 import { HttpError } from './http'
 import {
 	appendRoomEvent,
@@ -38,6 +38,8 @@ import {
 } from './security'
 import { registerAgentAccessRoutes } from './agent-access'
 import { registerAgentBoardsRoutes } from './agent-boards'
+import { readMeasurements, saveMeasurements } from './layout-measurements'
+import { measurementReportSchema } from '../shared/layout'
 import { createAccessVerifier } from './access-jwt'
 import { createHostPolicy, hostPolicyFromEnv, isMachineRoute, type HostPolicyConfig } from './host-policy'
 import { authenticateBoardCreator, authorizeApiToken, type ApiPermission } from './tokens'
@@ -64,6 +66,8 @@ export interface RateLimitOptions {
 	machineGate?: RateLimitSetting
 	/** Owner-only agent management routes (list, create, revoke), per signed-in user. */
 	agentAccess?: RateLimitSetting
+	/** Browser reports of measured text and note sizes, per signed-in user and board. */
+	layoutReport?: RateLimitSetting
 	/** Boards a single board-creating credential may create per window. */
 	agentBoardCredential?: RateLimitSetting
 	/** Boards all of one owner's board-creating credentials together may create per window. */
@@ -112,6 +116,9 @@ const AGENT_ACCESS_WINDOW_MS = 10 * 60_000
 const AGENT_BOARD_CREDENTIAL_LIMIT = 10
 const AGENT_BOARD_OWNER_LIMIT = 20
 const AGENT_BOARD_WINDOW_MS = 60 * 60_000
+// A browser reports measurements after edits, debounced; generous for one active editor, cheap to refuse beyond that.
+const LAYOUT_REPORT_LIMIT = 120
+const LAYOUT_REPORT_WINDOW_MS = 60_000
 const AI_EVENT_TYPES = [
 	'ai.requested',
 	'ai.suggestion_generated',
@@ -263,6 +270,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	const machineReadLimiter = limiterFor(options.rateLimits?.machineRead, MACHINE_READ_LIMIT, MACHINE_READ_WINDOW_MS)
 	const machineGateLimiter = limiterFor(options.rateLimits?.machineGate, MACHINE_GATE_LIMIT, MACHINE_GATE_WINDOW_MS)
 	const agentAccessLimiter = limiterFor(options.rateLimits?.agentAccess, AGENT_ACCESS_LIMIT, AGENT_ACCESS_WINDOW_MS)
+	const layoutReportLimiter = limiterFor(options.rateLimits?.layoutReport, LAYOUT_REPORT_LIMIT, LAYOUT_REPORT_WINDOW_MS)
 	const agentBoardCredentialLimiter = limiterFor(options.rateLimits?.agentBoardCredential, AGENT_BOARD_CREDENTIAL_LIMIT, AGENT_BOARD_WINDOW_MS)
 	const agentBoardOwnerLimiter = limiterFor(options.rateLimits?.agentBoardOwner, AGENT_BOARD_OWNER_LIMIT, AGENT_BOARD_WINDOW_MS)
 	const hostPolicy = createHostPolicy(options.hostPolicy ?? hostPolicyFromEnv(process.env, (teamDomain, audience) => createAccessVerifier({ teamDomain, audience })))
@@ -690,6 +698,41 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		return { roomId, ...readRoomCanvas(getRoomHandle(roomId).room, pageId) }
 	})
 
+	app.get('/api/rooms/:roomId/layout', async (request, reply) => {
+		const roomId = parseRoomId((request.params as { roomId: string }).roomId)
+		if (!roomId) return reply.code(400).send({ error: 'Invalid room ID' })
+		const access = resolveBoardAccess(request, roomId)
+		if (access.kind === 'token') {
+			if (!access.permissions.has('read')) return denyAccess(reply, access)
+			if (!machineReadLimiter.allow(accessRateKey(access, 'read', roomId))) return tooManyRequests(reply, 'reads')
+		} else if (access.kind !== 'user') {
+			return denyAccess(reply, access)
+		}
+		const query = request.query as Record<string, string | undefined>
+		const handle = getRoomHandle(roomId)
+		reply.header('Cache-Control', 'no-store')
+		return { roomId, ...readRoomLayout(handle.room, readMeasurements(handle.database), query.pageId, query) }
+	})
+
+	// A signed-in editor's browser reports the sizes it measured for text and notes. Human session only: a machine bearer is
+	// refused here, and the report is accepted only for shapes whose content still matches the fingerprint the browser measured.
+	app.post('/api/boards/:boardId/layout-measurements', async (request, reply) => {
+		const boardId = parseRoomId((request.params as { boardId: string }).boardId)
+		if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
+		const access = resolveBoardAccess(request, boardId)
+		if (access.kind !== 'user' || !userRoleHasWrite(access.role)) return denyAccess(reply, access)
+		if (!layoutReportLimiter.allow(accessRateKey(access, 'layout-report', boardId))) return tooManyRequests(reply, 'measurement reports')
+		const report = measurementReportSchema.parse(request.body)
+		const handle = getRoomHandle(boardId)
+		const current = new Map<string, { id: string; type: string; props: Record<string, unknown> }>()
+		for (const document of handle.room.getCurrentSnapshot().documents) {
+			const state = document.state as { id: string; typeName?: string; type?: string; props?: Record<string, unknown> }
+			if (state.typeName === 'shape' && state.type && state.props) current.set(state.id, { id: state.id, type: state.type, props: state.props })
+		}
+		reply.header('Cache-Control', 'no-store')
+		return saveMeasurements(handle.database, report.measurements, current, `user:${access.userId}`)
+	})
+
 	app.post('/api/rooms/:roomId/actions', async (request, reply) => {
 		const roomId = parseRoomId((request.params as { roomId: string }).roomId)
 		if (!roomId) return reply.code(400).send({ error: 'Invalid room ID' })
@@ -707,7 +750,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			sessionId: null,
 			source: access.kind === 'token' ? 'ai' : 'human',
 			immediate: true,
-		}, () => applyRoomActions(handle.room, request.body, actor, (uploadId) => authService.database.assetBelongsToBoard(uploadId, roomId)))
+		}, () => applyRoomActions(handle.room, request.body, actor, (uploadId) => authService.database.assetBelongsToBoard(uploadId, roomId), { measurements: readMeasurements(handle.database) }))
 		reply.header('Cache-Control', 'no-store')
 		return { roomId, ...result }
 	})

@@ -1,5 +1,5 @@
 import { getIndexAbove } from '@tldraw/utils'
-import { toRichText, type TLPage, type TLRecord, type TLShape, type TLShapeId } from '@tldraw/tlschema'
+import { toRichText, type TLBinding, type TLPage, type TLRecord, type TLShape, type TLShapeId } from '@tldraw/tlschema'
 import type { TLSocketRoom } from '@tldraw/sync-core'
 import { z } from 'zod'
 import { canvasActionSchema, type CanvasAction, type CanvasObject } from '../shared/ai'
@@ -16,13 +16,24 @@ import {
 	type SemanticContextRequest,
 } from '../shared/entities'
 import { schema } from './rooms'
+import { describeLayout, layoutOf, LayoutQueryError, parseLayoutQuery, rerouteManagedArrows, translateShape } from './layout-service'
+import { ALIGNMENT_TOLERANCE, LAYOUT_GAP, LAYOUT_TOOLS, layoutActionSchema, type LayoutAction, type LayoutTool, type Measurement } from '../shared/layout'
+import { ancestorsOf, edgePoint, rectsCloserThan, type PageLayout, type ShapeLayout } from '../shared/layout-geometry'
+import {
+	alignMoves, blockersFor, distributeMoves, findFreeRegion, gridMoves, LayoutError, placeBelow, placeRightOf, rowMoves, stackMoves, verifyLayout,
+	type LayoutVerification, type Move, type VerifyExpectation,
+} from '../shared/layout-engine'
 
 const SEMANTIC_TOOLS = new Set<SemanticAction['tool']>([
 	'create_entity', 'update_entity', 'link_entities', 'unlink_entities',
 	'record_experiment_result', 'attach_evidence', 'update_status',
 ])
-function isSemanticAction(action: CanvasAction | SemanticAction): action is SemanticAction {
+function isSemanticAction(action: CanvasAction | SemanticAction | LayoutAction): action is SemanticAction {
 	return SEMANTIC_TOOLS.has(action.tool as SemanticAction['tool'])
+}
+const LAYOUT_TOOL_SET: ReadonlySet<string> = new Set(LAYOUT_TOOLS)
+function isLayoutAction(action: CanvasAction | SemanticAction | LayoutAction): action is LayoutAction {
+	return LAYOUT_TOOL_SET.has(action.tool)
 }
 
 /**
@@ -30,7 +41,7 @@ function isSemanticAction(action: CanvasAction | SemanticAction): action is Sema
  * unmodified by this feature. See docs/reviews/2026-09-22-chibi-entity-design-deepseek.md #3:
  * a test pins canvasActionSchema's exact shape so this file can never silently change it.
  */
-const combinedActionSchema = z.union([canvasActionSchema, semanticActionSchema])
+const combinedActionSchema = z.union([canvasActionSchema, semanticActionSchema, layoutActionSchema])
 const combinedActionsSchema = z.array(combinedActionSchema).min(1).max(30)
 
 export const actionRequestSchema = z.object({
@@ -79,23 +90,30 @@ function objectFromShape(shape: TLShape): CanvasObject {
 		...(connection?.fromId && connection?.toId ? { fromId: connection.fromId, toId: connection.toId } : {}),
 	}
 }
-function edgePoint(shape: TLShape, toward: { x: number; y: number }) {
-	const object = objectFromShape(shape)
-	const center = { x: object.x + object.width / 2, y: object.y + object.height / 2 }
-	const dx = toward.x - center.x, dy = toward.y - center.y
-	if (!dx && !dy) return center
-	const rx = Math.max(object.width / 2, 1), ry = Math.max(object.height / 2, 1)
-	const scale = object.type === 'ellipse'
-		? 1 / Math.sqrt((dx / rx) ** 2 + (dy / ry) ** 2)
-		: 1 / Math.max(Math.abs(dx) / rx, Math.abs(dy) / ry)
-	return { x: center.x + dx * scale, y: center.y + dy * scale }
-}
-
 export function readRoomCanvas<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, requestedPageId?: string) {
 	const snapshot = room.getCurrentSnapshot()
 	const items = snapshot.documents.map((item) => item.state) as TLRecord[]
 	const page = selectedPage(items, requestedPageId)
 	return { pageId: page.id, pages: pages(items).map(({ id, name }) => ({ id, name })), clock: snapshot.documentClock, objects: shapes(items).filter((shape) => shape.parentId === page.id).map(objectFromShape) }
+}
+
+/**
+ * Authoritative-where-possible page-space geometry for every shape on a page, nested ones included. Bounds only: no text,
+ * no props. Each entry says where its bounds came from (`measured` by a browser, `declared` by the record, or
+ * `estimated`) and whether they are verified; an estimate is never presented as exact. `ids` and `types` narrow the
+ * response, and a page too large to return whole is refused rather than truncated silently.
+ */
+export function readRoomLayout<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, measurements: ReadonlyMap<string, Measurement>, requestedPageId: string | undefined, rawQuery: Record<string, string | undefined>) {
+	const snapshot = room.getCurrentSnapshot()
+	const items = snapshot.documents.map((item) => item.state) as TLRecord[]
+	const page = selectedPage(items, requestedPageId)
+	try {
+		const layout = layoutOf(items, page.id, measurements)
+		return { pages: pages(items).map(({ id, name }) => ({ id, name })), clock: snapshot.documentClock, ...describeLayout(layout, parseLayoutQuery(rawQuery)) }
+	} catch (error) {
+		if (error instanceof LayoutQueryError) throw new CanvasApiError(error.message, error.statusCode)
+		throw error
+	}
 }
 
 /* ------------------------------------------------------------ semantic layer -- */
@@ -260,7 +278,39 @@ export function readRoomSemantics<SessionMeta>(room: TLSocketRoom<TLRecord, Sess
 	return payload
 }
 
-export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, raw: unknown, actor: SemanticActor, isAssetInBoard?: (uploadId: string) => boolean) {
+export interface ApplyOptions {
+	/** Browser-reported sizes for text and notes, so layout actions place against the best geometry known. */
+	measurements?: ReadonlyMap<string, Measurement>
+}
+
+/** What this module needs from the room transaction, so the layout handlers can be written without the library's generics. */
+interface Txn {
+	get(id: string): TLRecord | undefined
+	set(id: string, record: TLRecord): void
+	delete(id: string): void
+	values(): Iterable<TLRecord>
+}
+
+interface LayoutRun {
+	/** Shapes whose geometry changed in this request, so arrows connected to them are re-routed at the end. */
+	affected: Set<string>
+	/** Shapes a layout action named or moved, which the final verification checks. */
+	touched: Set<string>
+	results: LayoutActionResult[]
+}
+
+export interface LayoutActionResult {
+	index: number
+	tool: LayoutTool
+	moved: Array<{ id: string; dx: number; dy: number }>
+	/** For find_free_region only: the region found, which nothing was written to. */
+	region?: { x: number; y: number; w: number; h: number; direction: 'below' | 'right'; travel: number }
+	/** For find_free_region: placement relied on neighbours whose bounds are not exact. */
+	unverifiedNeighbours?: Array<{ id: string; reason: string }>
+	verification?: LayoutVerification
+}
+
+export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, raw: unknown, actor: SemanticActor, isAssetInBoard?: (uploadId: string) => boolean, options: ApplyOptions = {}) {
 	const request = actionRequestSchema.parse(raw)
 	const { result, documentClock } = room.storage.transaction((txn) => {
 		if (request.expectedClock !== undefined && txn.getClock() !== request.expectedClock) throw new CanvasApiError('Canvas changed; read it again and retry', 409)
@@ -271,39 +321,61 @@ export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, Sessi
 		let topIndex = pageShapes.map((shape) => shape.index).sort().at(-1)
 		const entityCount = { current: entities(items).length }
 		const now = Date.now()
-		for (const action of request.actions) {
+		const run: LayoutRun = { affected: new Set(), touched: new Set(), results: [] }
+		for (const [position, action] of request.actions.entries()) {
 			if (isSemanticAction(action)) { applySemanticAction(txn, entityCount, action, actor, now, isAssetInBoard); continue }
+			if (isLayoutAction(action)) { applyLayoutAction(txn, page, action, position, current, run, options.measurements); continue }
 			if (action.tool === 'create_shape' || action.tool === 'create_text' || action.tool === 'create_arrow' || action.tool === 'connect_shapes') {
 				if (txn.get(action.id)) throw new CanvasApiError(`Object ID already exists: ${action.id}`, 409)
 				topIndex = getIndexAbove(topIndex)
-				const created = newShape(action, page.id, topIndex, current)
+				// An arrow drawn between two shapes is aimed at their real bounds (estimated for text no browser has measured).
+				const layout = action.tool === 'connect_shapes' ? layoutOf([...txn.values()], page.id, options.measurements) : null
+				const created = newShape(action, page.id, topIndex, current, layout)
 				schema.types.shape.validate(created)
 				txn.set(created.id, created)
 				current.set(created.id, created)
+				if (action.tool === 'connect_shapes') {
+					// A genuine tldraw binding per terminal, so the arrow follows its boxes when they move, in the browser too.
+					for (const binding of arrowBindings(created, action.fromId, action.toId)) {
+						if (txn.get(binding.id)) throw new CanvasApiError(`Object ID already exists: ${binding.id}`, 409)
+						schema.types.binding.validate(binding)
+						txn.set(binding.id, binding)
+					}
+				}
 				continue
 			}
 			const existing = current.get(action.id)
 			if (!existing) throw new CanvasApiError(`Unknown object on this page: ${action.id}`, 404)
-			if (action.tool === 'delete_shape') { txn.delete(existing.id); current.delete(existing.id); continue }
+			if (action.tool === 'delete_shape') {
+				txn.delete(existing.id)
+				current.delete(existing.id)
+				// A binding that points at (or from) a deleted shape would dangle, so it goes with it.
+				for (const record of [...txn.values()]) {
+					const binding = record as unknown as { typeName?: string; id: string; fromId?: string; toId?: string }
+					if (binding.typeName === 'binding' && (binding.fromId === existing.id || binding.toId === existing.id)) txn.delete(binding.id)
+				}
+				continue
+			}
 			let updated: TLShape
-			if (action.tool === 'move_shape') updated = { ...existing, x: action.x, y: action.y }
+			if (action.tool === 'move_shape') { updated = { ...existing, x: action.x, y: action.y }; run.affected.add(existing.id) }
 			else if (action.tool === 'update_text') {
 				if (!['geo', 'text', 'note'].includes(existing.type)) throw new CanvasApiError(`Shape ${existing.id} does not support text`)
 				updated = { ...existing, props: { ...existing.props, richText: toRichText(action.text) } } as TLShape
 			} else {
 				if (!['geo', 'frame'].includes(existing.type)) throw new CanvasApiError(`Shape ${existing.id} cannot be resized`)
 				updated = { ...existing, props: { ...existing.props, w: action.width, h: action.height } } as TLShape
+				run.affected.add(existing.id)
 			}
 			schema.types.shape.validate(updated, existing)
 			txn.set(updated.id, updated)
 			current.set(updated.id, updated)
 		}
-		return { pageId: page.id, applied: request.actions.length }
+		return { pageId: page.id, applied: request.actions.length, ...finishRun(txn, page, run, options.measurements) }
 	})
 	return { ...result, clock: documentClock }
 }
 
-function newShape(action: CanvasAction, pageId: TLPage['id'], index: TLShape['index'], current: Map<string, TLShape>): TLShape {
+function newShape(action: CanvasAction, pageId: TLPage['id'], index: TLShape['index'], current: Map<string, TLShape>, layout: PageLayout | null): TLShape {
 	let type: TLShape['type']
 	let x: number
 	let y: number
@@ -313,16 +385,18 @@ function newShape(action: CanvasAction, pageId: TLPage['id'], index: TLShape['in
 		props = { geo: action.type, w: action.width, h: action.height, color: 'black', labelColor: 'black', fill: 'none', dash: 'draw', size: 'm', font: 'draw', align: 'middle', verticalAlign: 'middle', richText: toRichText(action.text), url: '', growY: 0, scale: 1, flipX: false, flipY: false }
 	} else if (action.tool === 'create_text') {
 		type = 'text'; x = action.x; y = action.y
-		props = { color: 'black', size: 'm', font: 'draw', textAlign: 'start', w: 200, richText: toRichText(action.text), scale: 1, autoSize: true }
+		// With a width the text wraps at it (deterministic); without one it is one unwrapped line per paragraph, which is how
+		// tldraw sizes autoSize text and can be very wide.
+		props = { color: 'black', size: 'm', font: 'draw', textAlign: 'start', w: action.width ?? 200, richText: toRichText(action.text), scale: 1, autoSize: action.width === undefined }
 	} else {
 		let endX: number, endY: number
 		if (action.tool === 'connect_shapes') {
 			const from = current.get(action.fromId); const to = current.get(action.toId)
-			if (!from || !to) throw new CanvasApiError('Connection references an unknown object on this page', 404)
-			const a = objectFromShape(from); const b = objectFromShape(to)
-			const aCenter = { x: a.x + a.width / 2, y: a.y + a.height / 2 }
-			const bCenter = { x: b.x + b.width / 2, y: b.y + b.height / 2 }
-			const start = edgePoint(from, bCenter); const end = edgePoint(to, aCenter)
+			const fromLayout = layout?.byId.get(action.fromId); const toLayout = layout?.byId.get(action.toId)
+			if (!from || !to || !fromLayout || !toLayout) throw new CanvasApiError('Connection references an unknown object on this page', 404)
+			const centre = (rect: { x: number; y: number; w: number; h: number }) => ({ x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 })
+			const start = edgePoint(fromLayout.bounds, centre(toLayout.bounds), isEllipseShape(from))
+			const end = edgePoint(toLayout.bounds, centre(fromLayout.bounds), isEllipseShape(to))
 			x = start.x; y = start.y; endX = end.x; endY = end.y
 		} else if (action.tool === 'create_arrow') { x = action.x; y = action.y; endX = action.endX; endY = action.endY }
 		else throw new CanvasApiError('Unsupported create action')
@@ -332,4 +406,160 @@ function newShape(action: CanvasAction, pageId: TLPage['id'], index: TLShape['in
 	return { id: action.id as TLShapeId, typeName: 'shape', type, x, y, rotation: 0, index, parentId: pageId, isLocked: false, opacity: 1, props,
 		meta: action.tool === 'connect_shapes' ? { canvasApiConnection: { fromId: action.fromId, toId: action.toId } } : {},
 	} as unknown as TLShape
+}
+
+function isEllipseShape(shape: TLShape): boolean {
+	const geo = (shape.props as unknown as Record<string, unknown>).geo
+	return geo === 'ellipse' || geo === 'oval'
+}
+
+function arrowBindings(arrow: TLShape, fromId: string, toId: string): TLBinding[] {
+	const base = arrow.id.replace(/^shape:/, '')
+	const bind = (terminal: 'start' | 'end', target: string) => ({
+		id: `binding:${base}_${terminal}`, typeName: 'binding', type: 'arrow', fromId: arrow.id, toId: target,
+		props: { terminal, normalizedAnchor: { x: 0.5, y: 0.5 }, isExact: false, isPrecise: false, snap: 'none' }, meta: {},
+	}) as unknown as TLBinding
+	return [bind('start', fromId), bind('end', toId)]
+}
+
+/* ------------------------------------------------------------------ layout actions -- */
+
+function asShapes(txn: Txn): TLShape[] {
+	return shapes([...txn.values()])
+}
+
+function applyLayoutAction(txn: Txn, page: TLPage, action: LayoutAction, position: number, current: Map<string, TLShape>, run: LayoutRun, measurements: ReadonlyMap<string, Measurement> | undefined) {
+	const layout = layoutOf([...txn.values()], page.id, measurements)
+	try {
+		const gap = ('gap' in action && action.gap !== undefined ? action.gap : LAYOUT_GAP)
+		let moves: Move[] = []
+		let expectation: VerifyExpectation = { requestedGap: gap }
+		let ids: string[] = []
+		switch (action.tool) {
+			case 'find_free_region': {
+				const near = action.near ? layout.byId.get(action.near) : undefined
+				if (action.near && !near) throw new LayoutError(`Unknown object on this page: ${action.near}`, 404)
+				const direction = action.direction ?? 'any'
+				const anchor = near ? (direction === 'right' ? { x: near.bounds.x + near.bounds.w + gap, y: near.bounds.y } : { x: near.bounds.x, y: near.bounds.y + near.bounds.h + gap }) : undefined
+				const region = findFreeRegion(layout, { w: action.width, h: action.height }, { ...(anchor ? { anchor } : {}), direction, gap })
+				const nearby = blockersFor(layout, []).filter((blocker) => rectsCloserThan({ x: region.x, y: region.y, w: region.w, h: region.h }, blocker.rect, gap * 2))
+				const unverifiedNeighbours = nearby.map((blocker) => layout.byId.get(blocker.id) as ShapeLayout).filter((shape) => shape.verification === 'unverified')
+					.map((shape) => ({ id: shape.id, reason: shape.labelMayOverflow ? 'label-may-overflow' : shape.measurementStale ? 'measurement-stale' : 'estimated' }))
+				run.results.push({ index: position, tool: action.tool, moved: [], region: { x: round(region.x), y: round(region.y), w: region.w, h: region.h, direction: region.direction, travel: round(region.travel) }, unverifiedNeighbours })
+				return
+			}
+			case 'place_below':
+				ids = [action.id]; assertMovable(layout, ids, [action.targetId])
+				moves = placeBelow(layout, { id: action.id, targetId: action.targetId, gap, ...(action.align ? { align: action.align } : {}) })
+				expectation = { requestedGap: gap, pairs: [[action.id, action.targetId]] }
+				break
+			case 'place_right_of':
+				ids = [action.id]; assertMovable(layout, ids, [action.targetId])
+				moves = placeRightOf(layout, { id: action.id, targetId: action.targetId, gap, ...(action.align ? { align: action.align } : {}) })
+				expectation = { requestedGap: gap, pairs: [[action.id, action.targetId]] }
+				break
+			case 'align':
+				ids = unique(action.ids); assertMovable(layout, ids)
+				moves = alignMoves(layout, ids, action.axis)
+				expectation = { alignAxis: action.axis, alignIds: ids }
+				break
+			case 'distribute': {
+				ids = unique(action.ids); assertMovable(layout, ids)
+				moves = distributeMoves(layout, ids, action.direction, action.gap)
+				expectation = { ...(action.gap === undefined ? {} : { requestedGap: action.gap }), pairs: moves.slice(1).map((m, i) => [moves[i].id, m.id] as [string, string]) }
+				break
+			}
+			case 'row':
+				ids = unique(action.ids); assertMovable(layout, ids)
+				moves = rowMoves(layout, ids, { gap, ...(action.align ? { align: action.align } : {}), ...optional(action) })
+				expectation = { requestedGap: gap, pairs: ids.slice(1).map((id, i) => [ids[i], id] as [string, string]), alignAxis: action.align === 'bottom' ? 'bottom' : action.align === 'center' ? 'center-y' : 'top', alignIds: ids }
+				break
+			case 'stack':
+				ids = unique(action.ids); assertMovable(layout, ids)
+				moves = stackMoves(layout, ids, { gap, ...(action.align ? { align: action.align } : {}), ...optional(action) })
+				expectation = { requestedGap: gap, pairs: ids.slice(1).map((id, i) => [ids[i], id] as [string, string]), alignAxis: action.align === 'right' ? 'right' : action.align === 'center' ? 'center-x' : 'left', alignIds: ids }
+				break
+			case 'grid': {
+				ids = unique(action.ids); assertMovable(layout, ids)
+				const columnGap = action.columnGap ?? gap, rowGap = action.rowGap ?? gap
+				moves = gridMoves(layout, ids, action.columns, { gap, columnGap, rowGap, ...optional(action) })
+				const pairs: Array<[string, string]> = []
+				ids.forEach((id, i) => { if ((i + 1) % action.columns !== 0 && ids[i + 1]) pairs.push([id, ids[i + 1]]); if (ids[i + action.columns]) pairs.push([id, ids[i + action.columns]]) })
+				expectation = { requestedGap: Math.min(columnGap, rowGap), pairs }
+				break
+			}
+		}
+		const moved = applyMoves(txn, layout, moves, page, current, run)
+		const after = layoutOf([...txn.values()], page.id, measurements)
+		for (const id of ids) run.touched.add(id)
+		run.results.push({ index: position, tool: action.tool, moved, verification: verifyLayout(after, ids, expectation) })
+	} catch (error) {
+		if (error instanceof LayoutError) throw new CanvasApiError(error.message, error.statusCode)
+		throw error
+	}
+}
+
+const round = (value: number) => Math.round(value * 100) / 100
+const unique = <T,>(list: readonly T[]) => [...new Set(list)]
+const optional = (action: { x?: number; y?: number; avoidCollisions?: boolean }) => ({ ...(action.x === undefined ? {} : { x: action.x }), ...(action.y === undefined ? {} : { y: action.y }), ...(action.avoidCollisions === undefined ? {} : { avoidCollisions: action.avoidCollisions }) })
+
+/** Arrows are positioned by what they connect, locked shapes were deliberately pinned by a person, and a shape cannot move with its own container. */
+function assertMovable(layout: PageLayout, ids: readonly string[], references: readonly string[] = []) {
+	for (const id of [...ids, ...references]) if (!layout.byId.has(id)) throw new LayoutError(`Unknown object on this page: ${id}`, 404)
+	const moving = new Set(ids)
+	for (const id of ids) {
+		const shape = layout.byId.get(id) as ShapeLayout
+		if (shape.type === 'arrow') throw new LayoutError(`${id} is an arrow: arrows follow the shapes they connect, so move those instead`)
+		if (shape.locked) throw new LayoutError(`${id} is locked`, 409)
+		for (const ancestor of ancestorsOf(layout, id)) if (moving.has(ancestor)) throw new LayoutError(`${id} cannot be moved together with its container ${ancestor}`)
+	}
+}
+
+function applyMoves(txn: Txn, layout: PageLayout, moves: readonly Move[], page: TLPage, current: Map<string, TLShape>, run: LayoutRun): Array<{ id: string; dx: number; dy: number }> {
+	const moved: Array<{ id: string; dx: number; dy: number }> = []
+	for (const move of moves) {
+		if (Math.abs(move.dx) < 0.001 && Math.abs(move.dy) < 0.001) continue
+		const record = txn.get(move.id) as TLShape | undefined
+		if (!record || record.typeName !== 'shape') throw new LayoutError(`Unknown object on this page: ${move.id}`, 404)
+		const updated = translateShape(record, move, layout)
+		schema.types.shape.validate(updated, record)
+		txn.set(updated.id, updated)
+		if (updated.parentId === page.id) current.set(updated.id, updated)
+		run.affected.add(updated.id)
+		moved.push({ id: updated.id, dx: round(move.dx), dy: round(move.dy) })
+	}
+	return moved
+}
+
+/**
+ * End of every request: re-route the arrows this API drew whose boxes moved or resized (their bound ends already follow in
+ * the browser), and, when layout actions ran, verify the resulting board and the arrows attached to what moved.
+ */
+function finishRun(txn: Txn, page: TLPage, run: LayoutRun, measurements: ReadonlyMap<string, Measurement> | undefined): { layout?: Record<string, unknown> } {
+	if (run.affected.size > 0) {
+		const before = layoutOf([...txn.values()], page.id, measurements)
+		const records = new Map(asShapes(txn).map((shape) => [shape.id, shape]))
+		for (const arrow of rerouteManagedArrows(before, records, run.affected)) { schema.types.shape.validate(arrow, records.get(arrow.id)); txn.set(arrow.id, arrow) }
+	}
+	if (run.results.length === 0) return {}
+	const touched = [...new Set([...run.touched, ...run.affected])]
+	const final = layoutOf([...txn.values()], page.id, measurements)
+	const arrows = final.shapes.filter((shape) => shape.arrow && (touched.some((id) => shape.arrow?.connection?.fromId === id || shape.arrow?.connection?.toId === id || shape.arrow?.startBoundTo === id || shape.arrow?.endBoundTo === id))).map((shape) => {
+		const a = shape.arrow as NonNullable<ShapeLayout['arrow']>
+		const from = a.startBoundTo ?? a.connection?.fromId, to = a.endBoundTo ?? a.connection?.toId
+		const startGap = from && final.byId.get(from) ? distanceToRect(a.start, final.byId.get(from)!.bounds) : null
+		const endGap = to && final.byId.get(to) ? distanceToRect(a.end, final.byId.get(to)!.bounds) : null
+		return { id: shape.id, from: from ?? null, to: to ?? null, bound: Boolean(a.startBoundTo || a.endBoundTo), attached: (startGap === null || startGap <= ALIGNMENT_TOLERANCE) && (endGap === null || endGap <= ALIGNMENT_TOLERANCE), startGap: startGap === null ? null : round(startGap), endGap: endGap === null ? null : round(endGap) }
+	})
+	const verification = verifyLayout(final, touched.filter((id) => final.byId.get(id)?.type !== 'arrow'))
+	const statuses = [...run.results.map((item) => item.verification?.status), verification.status]
+	// A region found beside estimated neighbours is only as certain as those estimates.
+	const reliesOnEstimates = run.results.some((item) => (item.unverifiedNeighbours?.length ?? 0) > 0)
+	const status = statuses.includes('overlaps') ? 'overlaps' : statuses.includes('partially_unverified') || reliesOnEstimates || arrows.some((arrow) => !arrow.attached) ? 'partially_unverified' : 'verified'
+	return { layout: { status, results: run.results, final: verification, arrows, gap: LAYOUT_GAP } }
+}
+
+function distanceToRect(point: { x: number; y: number }, rect: { x: number; y: number; w: number; h: number }): number {
+	const dx = Math.max(rect.x - point.x, 0, point.x - (rect.x + rect.w)), dy = Math.max(rect.y - point.y, 0, point.y - (rect.y + rect.h))
+	return Math.hypot(dx, dy)
 }
