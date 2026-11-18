@@ -47,7 +47,7 @@
 		"vega-embed": "^7.3.0",
 		"vega-lite": "^6.5.0",
 		"ws": "^8.21.3",
-		"zod": "^4.5.4"
+		"zod": "^4.6.6"
 	},
 	"devDependencies": {
 		"@cloudflare/vite-plugin": "^1.29.1",
