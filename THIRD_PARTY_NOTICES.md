@@ -117,3 +117,11 @@ project). No GPL, AGPL, or other strong-copyleft dependency was found.
 Re-run `pnpm licenses list` after any dependency change to keep this
 current; this file is a point-in-time audit, not a guarantee about future
 dependency versions.
+
+The CAD review panel adds `three` and its development-only TypeScript
+declarations, `@types/three`. Both declare the MIT license. Three.js runs
+entirely in the browser; the feature does not call a hosted CAD or geometry
+service. The project uses it only to display a separately stored GLB (or STL) preview
+with orbit, pan, and zoom controls, using the `GLTFLoader`, `STLLoader` and
+`OrbitControls` modules that ship inside the `three` package. No Draco, Basis or
+Meshopt decoder, replicad (AGPL-3.0), or paid CAD service is used.

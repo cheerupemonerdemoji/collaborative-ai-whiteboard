@@ -10,7 +10,7 @@
  * FAIL / 8 BLOCKED, blocked only on account-dependent phases) by proving the same authorization
  * boundaries the moment four real identities exist, without needing production credentials. The
  * one remaining real public four-session run is still required before the migration is declared
- * complete - see docs/deployments/2026-09-28-acceptance-fixture.md.
+ * complete - see the acceptance-fixture design note.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -44,7 +44,7 @@ describe('assertSafeFixtureDataDirectory', () => {
 	})
 
 	it('refuses the real production checkout path', () => {
-		expect(() => assertSafeFixtureDataDirectory('/home/app/apps/collaborative-ai-canvas/data')).toThrow(/production/i)
+		expect(() => assertSafeFixtureDataDirectory('/home/app/collaborative-ai-canvas/data')).toThrow(/production/i)
 	})
 
 	it('refuses a Windows-style production-shaped path', () => {
@@ -68,7 +68,7 @@ describe('assertSafeFixtureDataDirectory', () => {
 		// production working directory rather than the bare relative string, whose resolution
 		// (and thus this test's correctness) would otherwise depend on the CWD the suite happens
 		// to run from.
-		const asResolvedFromProduction = resolve('/home/app/apps/collaborative-ai-canvas', 'data')
+		const asResolvedFromProduction = resolve('/home/app/collaborative-ai-canvas', 'data')
 		expect(() => assertSafeFixtureDataDirectory(asResolvedFromProduction)).toThrow(/temp/i)
 	})
 })

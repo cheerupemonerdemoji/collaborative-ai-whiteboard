@@ -22,6 +22,11 @@
 //                       instant. <value> is `30d` / `12h` (from now), or an
 //                       absolute UTC timestamp such as 2027-01-31T00:00:00Z.
 //                       Omit it and the client never expires, as before.
+//   --cad-upload        create only. Adds the `cad-upload` capability: this credential may upload validated CAD
+//                       artifacts and add CAD model entries to its one board. It needs write access, exactly one
+//                       board, AND --expires no more than 30 days away, and it can only be granted here, on the server.
+//                       `list` and `list --long` show it as a trailing `capabilities=cad-upload` field, on those rows only.
+//                       See the machine CAD upload design note.
 //   --long              list only. Appends createdAt, expiresAt and status
 //                       columns. Plain `list` is unchanged.
 //
@@ -29,10 +34,11 @@
 // owes the operator a usage message, while the module owes its callers a coded
 // error. Both reject the same inputs.
 
-import { ACCESS_MODES, createClient, describeClients, listClients, resolveStorePath, revokeClient } from '../server/token-store.mjs'
+import { ACCESS_MODES, CAD_UPLOAD_MAX_LIFETIME_DAYS, createClient, describeClients, listClients, resolveStorePath, revokeClient } from '../server/token-store.mjs'
 
 const CREATE_USAGE = 'Usage: create <client-name> <room[,room...]> [read|write|read-write|read-history|full]'
 const CREATE_USAGE_WITH_EXPIRY = `${CREATE_USAGE} [--expires <Nd|Nh|ISO-8601 UTC>]`
+const CREATE_USAGE_WITH_CAD = `${CREATE_USAGE} --expires <Nd|Nh|ISO-8601 UTC, at most ${CAD_UPLOAD_MAX_LIFETIME_DAYS} days away> --cad-upload`
 const LIST_USAGE = 'Usage: list [--long]'
 
 /**
@@ -45,6 +51,7 @@ function splitArguments(raw) {
 	let expires
 	let expiresWithoutValue = false
 	let long = false
+	let cadUpload = false
 	for (let index = 0; index < raw.length; index += 1) {
 		const argument = raw[index]
 		if (argument === '--expires') {
@@ -56,13 +63,15 @@ function splitArguments(raw) {
 			}
 		} else if (argument.startsWith('--expires=')) {
 			expires = argument.slice('--expires='.length)
+		} else if (argument === '--cad-upload') {
+			cadUpload = true
 		} else if (argument === '--long') {
 			long = true
 		} else {
 			positional.push(argument)
 		}
 	}
-	return { positional, expires, expiresWithoutValue, long }
+	return { positional, expires, expiresWithoutValue, long, cadUpload }
 }
 
 /**
@@ -83,30 +92,35 @@ function resolveExpiry(value) {
 }
 
 const file = resolveStorePath()
-const { positional, expires, expiresWithoutValue, long } = splitArguments(process.argv.slice(2))
+const { positional, expires, expiresWithoutValue, long, cadUpload } = splitArguments(process.argv.slice(2))
 const [command, name, roomList, access = 'read-write'] = positional
 const validName = (value) => /^[A-Za-z0-9_-]{1,64}$/.test(value ?? '')
 const validRoom = (value) => /^[A-Za-z0-9_-]{1,80}$/.test(value)
+/** A trailing, self-describing field, only on a row whose client holds a capability, so every other row is byte-for-byte what it was. */
+const capabilityField = (client) => (client.capabilities?.length ? `\tcapabilities=${client.capabilities.join(',')}` : '')
 
 if (command === 'create') {
 	const rooms = roomList?.split(',') ?? []
-	const usage = expires !== undefined || expiresWithoutValue ? CREATE_USAGE_WITH_EXPIRY : CREATE_USAGE
+	const usage = cadUpload ? CREATE_USAGE_WITH_CAD : expires !== undefined || expiresWithoutValue ? CREATE_USAGE_WITH_EXPIRY : CREATE_USAGE
 	if (long || expiresWithoutValue || !validName(name) || rooms.length < 1 || rooms.length > 50 || !rooms.every(validRoom) || !(access in ACCESS_MODES)) throw new Error(usage)
-	const { token, expiresAt } = await createClient({ file, name, rooms, access, ...(expires === undefined ? {} : { expiresAt: resolveExpiry(expires) }) })
+	// A cad-upload credential must expire, and soon. The shared module enforces the same rule; this is the operator's message.
+	if (cadUpload && expires === undefined) throw new Error(usage)
+	const { token, expiresAt } = await createClient({ file, name, rooms, access, ...(cadUpload ? { capabilities: ['cad-upload'] } : {}), ...(expires === undefined ? {} : { expiresAt: resolveExpiry(expires) }) })
 	console.log(`Token for ${name} (copy it now; only its hash is stored):\n${token}`)
 	if (expiresAt !== undefined) console.log(`Expires ${expiresAt}`)
+	if (cadUpload) console.log('Capability cad-upload granted for this one board.')
 } else if (command === 'revoke') {
-	if (expires !== undefined || expiresWithoutValue || long || !validName(name)) throw new Error('Usage: revoke <client-name>')
+	if (expires !== undefined || expiresWithoutValue || long || cadUpload || !validName(name)) throw new Error('Usage: revoke <client-name>')
 	await revokeClient(file, name)
 	console.log(`Revoked ${name}`)
 } else if (command === 'list') {
-	if (expires !== undefined || expiresWithoutValue) throw new Error(LIST_USAGE)
+	if (expires !== undefined || expiresWithoutValue || cadUpload) throw new Error(LIST_USAGE)
 	if (long) {
 		for (const client of await describeClients(file)) {
-			console.log([client.name, client.rooms.join(','), client.permissions.join(','), client.createdAt ?? '-', client.expiresAt ?? '-', client.status].join('\t'))
+			console.log([client.name, client.rooms.join(','), client.permissions.join(','), client.createdAt ?? '-', client.expiresAt ?? '-', client.status].join('\t') + capabilityField(client))
 		}
 	} else {
-		for (const client of await listClients(file)) console.log(`${client.name}\t${client.rooms.join(',')}\t${client.permissions.join(',')}`)
+		for (const client of await listClients(file)) console.log(`${client.name}\t${client.rooms.join(',')}\t${client.permissions.join(',')}${capabilityField(client)}`)
 	}
 } else {
 	throw new Error('Usage: node scripts/manage-api-tokens.mjs create|revoke|list ...')

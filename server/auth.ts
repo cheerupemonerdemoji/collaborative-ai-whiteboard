@@ -22,6 +22,7 @@ const MAX_INVITATION_TTL_MS = 30 * 24 * 60 * 60_000
 const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60_000
 const DEFAULT_INVITATION_TTL_MS = 7 * 24 * 60 * 60_000
 const MAX_SETTINGS_BYTES = 16 * 1_024
+const SITE_OWNER_AUDIT_THROTTLE_MS = 10 * 60_000
 
 export const SCRYPT_PARAMETERS = Object.freeze({
 	cost: 32_768,
@@ -90,11 +91,20 @@ export interface AgentActor {
 	agent?: string
 }
 
+/**
+ * How a caller reached a board. `site-owner` is the administrator override: the account is not a member (or is
+ * only a lesser member) and reaches the board through `users.is_admin` alone. The recorded owner and the
+ * membership rows are never altered by it.
+ */
+export type BoardAccessVia = 'membership' | 'site-owner'
+
 export interface BoardSummary {
 	id: string
 	name: string
 	ownerUserId: string
+	/** The caller's effective role. A site owner is always effectively `owner`. */
 	role: BoardRole
+	access: BoardAccessVia
 	createdAt: string
 	updatedAt: string
 	deletedAt: string | null
@@ -335,12 +345,25 @@ function publicSession(session: SessionRecord): AuthSession {
 	}
 }
 
-function publicBoard(board: BoardWithRoleRecord | BoardRecord, role: BoardRole): BoardSummary {
+interface ResolvedBoardAccess {
+	board: BoardRecord
+	role: BoardRole
+	via: BoardAccessVia
+}
+
+/** The site-owner rule, in one expression: an administrator is `owner` everywhere, otherwise membership decides. */
+function accessFor(user: UserRecord, membership: Pick<BoardMemberRecord, 'role'> | null): { role: BoardRole; via: BoardAccessVia } | null {
+	if (user.isAdmin) return { role: 'owner', via: membership?.role === 'owner' ? 'membership' : 'site-owner' }
+	return membership ? { role: membership.role, via: 'membership' } : null
+}
+
+function publicBoard(board: BoardWithRoleRecord | BoardRecord, role: BoardRole, access: BoardAccessVia = 'membership'): BoardSummary {
 	return {
 		id: board.id,
 		name: board.name,
 		ownerUserId: board.ownerUserId,
 		role,
+		access,
 		createdAt: board.createdAt,
 		updatedAt: board.updatedAt,
 		deletedAt: board.deletedAt,
@@ -374,6 +397,7 @@ export class AuthService {
 	private readonly allowOpenRegistration: boolean
 	private readonly sessionTtlMs: number
 	private readonly invitationTtlMs: number
+	private readonly siteOwnerAuditSeen = new Map<string, number>()
 
 	constructor(databaseOrOptions: AuthDatabase | AuthServiceOptions = {}) {
 		const options = databaseOrOptions instanceof AuthDatabase ? { database: databaseOrOptions } : databaseOrOptions
@@ -533,9 +557,24 @@ export class AuthService {
 		})
 	}
 
-	listBoards(userId: string, includeDeleted = false): BoardSummary[] {
-		this.requireActiveUser(userId)
-		return this.database.listBoardsForUser(userId, includeDeleted).map((board) => publicBoard(board, board.role))
+	/**
+	 * `scope: 'mine'` (the default) is the caller's own membership list for every account, administrators included.
+	 * `scope: 'all'` is the site-owner view of every board and is refused for anyone else. In both, `role` is the
+	 * caller's effective role and `access` says whether it comes from a membership or from the site-owner override.
+	 */
+	listBoards(userId: string, includeDeleted = false, scope: 'mine' | 'all' = 'mine'): BoardSummary[] {
+		const user = this.requireActiveUser(userId)
+		if (scope === 'all') {
+			if (!user.isAdmin) throw new AuthError('forbidden', 'Administrator access is required', 403)
+			return this.database.listAllBoards(includeDeleted).flatMap((board) => {
+				const access = accessFor(user, this.database.getBoardMember(board.id, userId))
+				return access ? [publicBoard(board, access.role, access.via)] : []
+			})
+		}
+		return this.database.listBoardsForUser(userId, includeDeleted).flatMap((board) => {
+			const access = accessFor(user, { role: board.role })
+			return access ? [publicBoard(board, access.role, access.via)] : []
+		})
 	}
 
 	/**
@@ -585,58 +624,120 @@ export class AuthService {
 	}
 
 	getBoard(userId: string, boardId: string, includeDeleted = false): BoardSummary | null {
-		this.requireActiveUser(userId)
-		const id = validateBoardId(boardId)
-		const board = this.database.getBoardById(id)
-		const membership = this.database.getBoardMember(id, userId)
-		if (!board || !membership || (!includeDeleted && board.deletedAt)) return null
-		return publicBoard(board, membership.role)
+		const access = this.resolveBoardAccess(userId, boardId, includeDeleted)
+		return access ? publicBoard(access.board, access.role, access.via) : null
 	}
 
 	getBoardRole(userId: string, boardId: string, includeDeleted = false): BoardRole | null {
-		return this.getBoard(userId, boardId, includeDeleted)?.role ?? null
+		return this.resolveBoardAccess(userId, boardId, includeDeleted)?.role ?? null
+	}
+
+	/** An active administrator. False for a missing or disabled account rather than throwing. */
+	isSiteOwner(userId: string): boolean {
+		const user = this.database.getUserById(userId)
+		return Boolean(user && user.isAdmin && !user.disabledAt)
+	}
+
+	boardExists(boardId: string, includeDeleted = false): boolean {
+		const board = this.database.getBoardById(validateBoardId(boardId))
+		return Boolean(board && (includeDeleted || !board.deletedAt))
+	}
+
+	/**
+	 * The caller's stored membership role only: the site-owner override is deliberately NOT applied here. Agent
+	 * credential management runs its ordinary ownership rules on this first and lets the site owner through only
+	 * where they refuse (see `registerAgentAccessRoutes`), so the override stays visible and auditable there.
+	 */
+	getMembershipRole(userId: string, boardId: string, includeDeleted = false): BoardRole | null {
+		this.requireActiveUser(userId)
+		const board = this.database.getBoardById(validateBoardId(boardId))
+		if (!board || (!includeDeleted && board.deletedAt)) return null
+		return this.database.getBoardMember(board.id, userId)?.role ?? null
+	}
+
+	/** Effective role plus how it was obtained, or null when `userId` cannot reach the board. */
+	getBoardAccess(userId: string, boardId: string, includeDeleted = false): { role: BoardRole; via: BoardAccessVia } | null {
+		const access = this.resolveBoardAccess(userId, boardId, includeDeleted)
+		return access ? { role: access.role, via: access.via } : null
+	}
+
+	/** Asset reads: membership grants only the board's registered assets, and so does the site-owner override. */
+	canReadBoardAsset(userId: string, boardId: string, uploadId: string): boolean {
+		const access = this.resolveBoardAccess(userId, boardId, false)
+		if (!access) return false
+		if (access.via !== 'site-owner') return this.database.canReadAsset(userId, access.board.id, uploadId)
+		if (!this.database.assetBelongsToBoard(uploadId, access.board.id)) return false
+		// This route does not pass through the HTTP access resolver, so the read is recorded here, not left to the caller.
+		this.recordSiteOwnerAccess(userId, access.board.id, 'asset.read')
+		return true
+	}
+
+	/**
+	 * Records that a site owner reached a board they are not a member of, for the data-plane paths that are too
+	 * frequent to audit one-for-one (socket connections, uploads). A no-op for ordinary access. Repeats of the same
+	 * action on the same board by the same account inside `throttleMs` collapse into one row; pass 0 to record all.
+	 */
+	auditSiteOwnerAccess(userId: string, boardId: string, action: string, throttleMs = SITE_OWNER_AUDIT_THROTTLE_MS): void {
+		const access = this.resolveBoardAccess(userId, boardId, true)
+		if (access?.via === 'site-owner') this.recordSiteOwnerAccess(userId, access.board.id, action, throttleMs)
+	}
+
+	/** Callers have already established `via === 'site-owner'`; this only throttles and writes the row. */
+	private recordSiteOwnerAccess(userId: string, boardId: string, action: string, throttleMs = SITE_OWNER_AUDIT_THROTTLE_MS): void {
+		const key = `${userId}\u0000${boardId}\u0000${action}`
+		const now = this.now().getTime()
+		const last = this.siteOwnerAuditSeen.get(key)
+		if (throttleMs > 0 && last !== undefined && now - last < throttleMs) return
+		this.siteOwnerAuditSeen.set(key, now)
+		if (this.siteOwnerAuditSeen.size > 2_000) {
+			for (const [seenKey, seenAt] of this.siteOwnerAuditSeen) {
+				if (now - seenAt >= SITE_OWNER_AUDIT_THROTTLE_MS) this.siteOwnerAuditSeen.delete(seenKey)
+			}
+		}
+		this.event('admin.board_accessed', userId, null, boardId, { actorKind: 'site-owner', action }, new Date(now).toISOString())
 	}
 
 	renameBoard(userId: string, boardId: string, name: string): BoardSummary {
-		const { board, membership } = this.requireBoardMember(userId, boardId, true)
-		if (membership.role !== 'owner') throw new AuthError('forbidden', 'Only the board owner can rename this board', 403)
+		const access = this.requireBoardOwner(userId, boardId, true, 'Only the board owner can rename this board')
+		const { board } = access
 		const cleanName = cleanBoardName(name)
 		const at = this.now().toISOString()
 		this.database.transaction(() => {
 			this.database.renameBoard(board.id, cleanName, at)
-			this.event('board.renamed', userId, userId, board.id, { previousName: board.name, name: cleanName }, at)
+			this.event('board.renamed', userId, userId, board.id, this.siteOwnerMetadata(access, { previousName: board.name, name: cleanName }), at)
 		})
-		return publicBoard({ ...board, name: cleanName, updatedAt: at }, membership.role)
+		return publicBoard({ ...board, name: cleanName, updatedAt: at }, access.role, access.via)
 	}
 
 	deleteBoard(userId: string, boardId: string, options?: AgentActor & { reason?: string }): BoardSummary {
-		const { board, membership } = this.requireBoardMember(userId, boardId, true)
-		if (membership.role !== 'owner') throw new AuthError('forbidden', 'Only the board owner can delete this board', 403)
-		if (board.deletedAt) return publicBoard(board, membership.role)
+		const access = this.requireBoardOwner(userId, boardId, true, 'Only the board owner can delete this board')
+		const { board } = access
+		if (board.deletedAt) return publicBoard(board, access.role, access.via)
 		const at = this.now().toISOString()
 		this.database.transaction(() => {
 			this.database.setBoardDeleted(board.id, at, at)
 			if (options?.agent) this.event('board.deleted', null, userId, board.id, { actorKind: 'agent', agentName: options.agent, ...(options.reason ? { reason: options.reason } : {}) }, at)
-			else this.event('board.deleted', userId, userId, board.id, {}, at)
+			else this.event('board.deleted', userId, userId, board.id, this.siteOwnerMetadata(access, {}), at)
 		})
-		return publicBoard({ ...board, updatedAt: at, deletedAt: at }, membership.role)
+		return publicBoard({ ...board, updatedAt: at, deletedAt: at }, access.role, access.via)
 	}
 
 	restoreBoard(userId: string, boardId: string): BoardSummary {
-		const { board, membership } = this.requireBoardMember(userId, boardId, true)
-		if (membership.role !== 'owner') throw new AuthError('forbidden', 'Only the board owner can restore this board', 403)
-		if (!board.deletedAt) return publicBoard(board, membership.role)
+		const access = this.requireBoardOwner(userId, boardId, true, 'Only the board owner can restore this board')
+		const { board } = access
+		if (!board.deletedAt) return publicBoard(board, access.role, access.via)
 		const at = this.now().toISOString()
 		this.database.transaction(() => {
 			this.database.setBoardDeleted(board.id, null, at)
-			this.event('board.restored', userId, userId, board.id, {}, at)
+			this.event('board.restored', userId, userId, board.id, this.siteOwnerMetadata(access, {}), at)
 		})
-		return publicBoard({ ...board, updatedAt: at, deletedAt: null }, membership.role)
+		return publicBoard({ ...board, updatedAt: at, deletedAt: null }, access.role, access.via)
 	}
 
 	listBoardMembers(userId: string, boardId: string): BoardMember[] {
-		this.requireBoardMember(userId, boardId, false)
-		return this.database.listBoardMembers(validateBoardId(boardId))
+		const access = this.requireBoardAccess(userId, boardId, false)
+		if (access.via === 'site-owner') this.recordSiteOwnerAccess(userId, access.board.id, 'members.list')
+		return this.database.listBoardMembers(access.board.id)
 	}
 
 	setBoardMemberRole(
@@ -645,8 +746,8 @@ export class AuthService {
 		targetUserId: string,
 		role: Exclude<BoardRole, 'owner'> | null,
 	): BoardMember | null {
-		const { board, membership } = this.requireBoardMember(actorUserId, boardId, false)
-		if (membership.role !== 'owner') throw new AuthError('forbidden', 'Only the board owner can manage members', 403)
+		const access = this.requireBoardOwner(actorUserId, boardId, false, 'Only the board owner can manage members')
+		const { board } = access
 		if (targetUserId === board.ownerUserId) throw new AuthError('forbidden', 'The board owner role cannot be changed', 403)
 		this.requireActiveUser(targetUserId)
 		if (role !== null && role !== 'editor' && role !== 'viewer') {
@@ -656,7 +757,7 @@ export class AuthService {
 		return this.database.transaction(() => {
 			if (role === null) {
 				this.database.removeBoardMember(board.id, targetUserId)
-				this.event('board.member_removed', actorUserId, targetUserId, board.id, {}, at)
+				this.event('board.member_removed', actorUserId, targetUserId, board.id, this.siteOwnerMetadata(access, {}), at)
 				return null
 			}
 			const existing = this.database.getBoardMember(board.id, targetUserId)
@@ -668,7 +769,7 @@ export class AuthService {
 				updatedAt: at,
 			}
 			this.database.upsertBoardMember(member)
-			this.event('board.member_role_changed', actorUserId, targetUserId, board.id, { role }, at)
+			this.event('board.member_role_changed', actorUserId, targetUserId, board.id, this.siteOwnerMetadata(access, { role }), at)
 			return member
 		})
 	}
@@ -682,9 +783,9 @@ export class AuthService {
 		if (input.role === 'owner') throw new AuthError('invalid_input', 'Invitations cannot grant owner access', 400)
 		if (!boardId && input.role) throw new AuthError('invalid_input', 'Account invitations cannot specify a board role', 400)
 		const role: Exclude<BoardRole, 'owner'> | null = boardId ? (input.role ?? 'viewer') : null
+		let boardAccess: ResolvedBoardAccess | null = null
 		if (boardId) {
-			const { membership } = this.requireBoardMember(actorUserId, boardId, false)
-			if (membership.role !== 'owner') throw new AuthError('forbidden', 'Only the board owner can invite members', 403)
+			boardAccess = this.requireBoardOwner(actorUserId, boardId, false, 'Only the board owner can invite members')
 		} else if (!actor.isAdmin) {
 			throw new AuthError('forbidden', 'Only an administrator can create account invitations', 403)
 		}
@@ -713,12 +814,12 @@ export class AuthService {
 		}
 		this.database.transaction(() => {
 			this.database.insertInvitation(invitation)
-			this.event('invitation.created', actorUserId, null, boardId, {
+			this.event('invitation.created', actorUserId, null, boardId, this.siteOwnerMetadata(boardAccess, {
 				invitationId: invitation.id,
 				role,
 				invitedLogin: invitedLoginNormalized,
 				expiresAt: invitation.expiresAt,
-			}, at)
+			}), at)
 		})
 		return { invitation: publicInvitation(invitation), token }
 	}
@@ -786,8 +887,7 @@ export class AuthService {
 	listAuditEvents(actorUserId: string, options: { userId?: string; boardId?: string; limit?: number } = {}): AccountEventRecord[] {
 		const actor = this.requireActiveUser(actorUserId)
 		if (options.boardId && !actor.isAdmin) {
-			const { membership } = this.requireBoardMember(actorUserId, options.boardId, true)
-			if (membership.role !== 'owner') throw new AuthError('forbidden', 'Board owner access is required', 403)
+			this.requireBoardOwner(actorUserId, options.boardId, true, 'Board owner access is required')
 		} else if (!actor.isAdmin && options.userId !== actorUserId) {
 			throw new AuthError('forbidden', 'Administrator access is required', 403)
 		}
@@ -801,15 +901,36 @@ export class AuthService {
 		return user
 	}
 
-	private requireBoardMember(userId: string, boardId: string, includeDeleted: boolean): { board: BoardRecord; membership: BoardMemberRecord } {
-		this.requireActiveUser(userId)
+	/**
+	 * The single place a board role is decided. Membership grants the stored role; an active administrator
+	 * (the site owner) is always effectively `owner`, with or without a membership and even over a lesser one,
+	 * and `via` records which of the two applied. Nothing else grants a role, and no membership row is written.
+	 * A missing, soft-deleted (unless `includeDeleted`) or inaccessible board is indistinguishable: null.
+	 */
+	private resolveBoardAccess(userId: string, boardId: string, includeDeleted: boolean): ResolvedBoardAccess | null {
+		const user = this.requireActiveUser(userId)
 		const id = validateBoardId(boardId)
 		const board = this.database.getBoardById(id)
-		const membership = this.database.getBoardMember(id, userId)
-		if (!board || !membership || (!includeDeleted && board.deletedAt)) {
-			throw new AuthError('board_not_found', 'Board was not found', 404)
-		}
-		return { board, membership }
+		if (!board || (!includeDeleted && board.deletedAt)) return null
+		const access = accessFor(user, this.database.getBoardMember(id, userId))
+		return access ? { board, ...access } : null
+	}
+
+	private requireBoardAccess(userId: string, boardId: string, includeDeleted: boolean): ResolvedBoardAccess {
+		const access = this.resolveBoardAccess(userId, boardId, includeDeleted)
+		if (!access) throw new AuthError('board_not_found', 'Board was not found', 404)
+		return access
+	}
+
+	private requireBoardOwner(userId: string, boardId: string, includeDeleted: boolean, message: string): ResolvedBoardAccess {
+		const access = this.requireBoardAccess(userId, boardId, includeDeleted)
+		if (access.role !== 'owner') throw new AuthError('forbidden', message, 403)
+		return access
+	}
+
+	/** Marks an audit row written under the site-owner override; ordinary membership rows are left exactly as before. */
+	private siteOwnerMetadata(access: ResolvedBoardAccess | null, metadata: Record<string, unknown>): Record<string, unknown> {
+		return access?.via === 'site-owner' ? { ...metadata, actorKind: 'site-owner', accessVia: 'site-owner' } : metadata
 	}
 
 	private assertInvitationUsable(invitation: InvitationRecord, loginNormalized: string, at: string): void {

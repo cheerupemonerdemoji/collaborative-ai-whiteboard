@@ -61,7 +61,7 @@ const eventsOf = (...types: string[]) =>
 async function makeCreator(identity = f.owner, extra: Record<string, unknown> = {}) {
 	const response = await identity.post(ACCESS, { kind: 'board-creator', displayName: 'Planner', access: 'read-write-history', ...extra })
 	expect(response.statusCode, response.body).toBe(201)
-	return response.json() as { agent: { ref: string; name: string; [key: string]: unknown }; token: string }
+	return response.json() as { agent: { ref: string; name: string; rooms: string[]; [key: string]: unknown }; token: string; board: { id: string; name: string } }
 }
 
 const createBoard = (token: string, name = 'Project one', headers: Record<string, string> = {}, payload: unknown = { name }) =>
@@ -171,15 +171,15 @@ describe('who may create a board', () => {
 })
 
 describe('what a created board gives the agent, and what it does not', () => {
-	it('makes the board belong to the configured human owner and records exactly that board on the credential', async () => {
-		const { token, agent } = await makeCreator()
+	it('makes every created board belong to the configured human owner and records both on the credential', async () => {
+		const { token, agent, board: initialBoard } = await makeCreator()
 		const boardId = (await createBoard(token, 'Mine')).json().boardId as string
 		const [board] = rows<{ owner_user_id: string; name: string; deleted_at: string | null }>('SELECT owner_user_id, name, deleted_at FROM boards WHERE id = ?', boardId)
 		expect(board).toMatchObject({ owner_user_id: f.owner.userId, name: 'Mine', deleted_at: null })
 		expect(rows<{ role: string }>('SELECT role FROM board_members WHERE board_id = ? AND user_id = ?', boardId, f.owner.userId)[0].role).toBe('owner')
 		expect(rows('SELECT 1 FROM board_members WHERE board_id = ?', boardId)).toHaveLength(1) // the agent is never a member
 		const record = store().accountClients!.find((client) => client.name === agent.name)!
-		expect(record.rooms).toEqual([boardId])
+		expect(record.rooms).toEqual([initialBoard.id, boardId])
 	})
 
 	it('lets the same bearer use the new board straight away, with the configured permissions and no others', async () => {
@@ -214,9 +214,10 @@ describe('what a created board gives the agent, and what it does not', () => {
 		expect(authorizeApiToken(bearer(token), f.boardId, 'read')).toBeNull()
 	})
 
-	it('has no access at all before the first board exists', async () => {
-		const { token } = await makeCreator()
-		expect(store().accountClients![0].rooms).toEqual([])
+	it('automatically gets its first board but no access to a pre-existing board', async () => {
+		const { token, board } = await makeCreator()
+		expect(store().accountClients![0].rooms).toEqual([board.id])
+		expect(authorizeApiToken(bearer(token), board.id, 'read')).not.toBeNull()
 		expect((await f.app.inject({ method: 'GET', url: `/api/rooms/${f.boardId}/canvas`, headers: { authorization: bearer(token) } })).statusCode).toBe(401)
 	})
 
@@ -239,12 +240,13 @@ describe('the request body', () => {
 	it('is strict: a name and nothing else, and never a client-chosen board id', async () => {
 		const { token } = await makeCreator()
 		const before = boardCount()
+		const roomsBefore = [...store().accountClients![0].rooms]
 		for (const payload of [{ name: 'x', id: 'chosen-id' }, { name: 'x', extra: true }, {}, { name: '' }, { name: 'a'.repeat(121) }, { name: 5 }, []]) {
 			const response = await createBoard(token, 'x', {}, payload)
 			expect([400, 422], JSON.stringify(payload)).toContain(response.statusCode)
 		}
 		expect(boardCount()).toBe(before)
-		expect(store().accountClients![0].rooms).toEqual([])
+		expect(store().accountClients![0].rooms).toEqual(roomsBefore)
 	})
 
 	it('applies the human route\'s name rules: a name that is only whitespace is refused, with nothing created or granted', async () => {
@@ -265,7 +267,7 @@ describe('limits', () => {
 		for (let index = 0; index < 11; index += 1) statuses.push((await createBoard(token, `Board ${index}`)).statusCode)
 		expect(statuses.slice(0, 10)).toEqual(Array(10).fill(201))
 		expect(statuses[10]).toBe(429)
-		expect(store().accountClients![0].rooms).toHaveLength(10)
+		expect(store().accountClients![0].rooms).toHaveLength(11) // the automatic first board plus ten API-created boards
 	})
 
 	it('counts per credential: a second credential of the same owner is not held back by the first', async () => {
@@ -372,7 +374,7 @@ describe('failure injection around the database / token-store boundary', () => {
 		expect(boardCount()).toBe(boardsBefore)
 		expect(storeBytes()).toBe(bytes)
 		expect(backupCount()).toBe(backupsBefore)
-		expect(store().accountClients!.find((client) => client.name === agent.name)!.rooms).toEqual([])
+		expect(store().accountClients!.find((client) => client.name === agent.name)!.rooms).toEqual(agent.rooms)
 	})
 
 	it('the grant cannot be persisted: the new board is soft-deleted, the store is byte-identical and the caller gets a failure', async () => {
@@ -412,7 +414,7 @@ describe('audit', () => {
 		const response = await createBoard(token, 'Audited')
 		const boardId = response.json().boardId as string
 
-		const [created] = eventsOf('agent.board_created')
+		const [created] = eventsOf('agent.board_created').filter((event) => event.board_id === boardId)
 		expect(created.actor_user_id).toBeNull()
 		expect(created.board_id).toBe(boardId)
 		expect(JSON.parse(created.metadata_json)).toEqual({ actorKind: 'agent', agentName: agent.name, ownerUserId: f.owner.userId, boardId, name: 'Audited' })
@@ -536,11 +538,15 @@ describe('managing board-creating credentials (the Agents page)', () => {
 
 	it('returns the one-time token, hides every hash, and registers the owner as the caller', async () => {
 		const response = await f.editor.post(ACCESS, { kind: 'board-creator', displayName: '  Planner  ', access: 'read-write-history', expiresAt: new Date(Date.now() + 86_400_000).toISOString() })
-		const body = response.json() as { agent: Record<string, any>; token: string }
+		const body = response.json() as { agent: Record<string, any>; token: string; board: { id: string; name: string } }
 		expect(body.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
-		expect(body.agent).toMatchObject({ canCreateBoards: true, displayName: 'Planner', rooms: [], permissions: ['read', 'write', 'history'], status: 'active', createdByYou: true })
+		expect(body.board.name).toBe('Planner')
+		expect(body.agent).toMatchObject({ canCreateBoards: true, displayName: 'Planner', rooms: [body.board.id], permissions: ['read', 'write', 'history'], status: 'active', createdByYou: true })
 		expect(response.body).not.toMatch(/tokenHash|[0-9a-f]{64}/)
-		expect(store().accountClients![0]).toMatchObject({ ownerUserId: f.editor.userId, createdByUserId: f.editor.userId, accountPermissions: ['board:create'], rooms: [] })
+		expect(store().accountClients![0]).toMatchObject({ ownerUserId: f.editor.userId, createdByUserId: f.editor.userId, accountPermissions: ['board:create'], rooms: [body.board.id] })
+		expect((await f.editor.get(`/api/boards/${body.board.id}`)).json().board.role).toBe('owner')
+		expect(((await f.editor.get('/api/boards')).json().boards as Array<{ id: string }>).map((board) => board.id)).toContain(body.board.id)
+		expect(authorizeApiToken(bearer(body.token), body.board.id, 'write')).toBe(body.agent.name)
 		expect(store().clients).toEqual([])
 		// and the audit row names the kind, with no board and no secret
 		const [event] = eventsOf('agent.created')
@@ -571,12 +577,12 @@ describe('managing board-creating credentials (the Agents page)', () => {
 		expect(store().accountClients).toHaveLength(20)
 	})
 
-	it('lists only the caller\'s own, including ones that hold no boards yet', async () => {
+	it('lists only the caller\'s own, including its automatically created board', async () => {
 		const mine = await makeCreator(f.owner, { displayName: 'Mine' })
 		await makeCreator(f.nonmember, { displayName: 'Theirs' })
 		const listed = (await f.owner.get(`${ACCESS}?scope=creators`)).json().agents as Array<Record<string, any>>
 		expect(listed.map((agent) => agent.displayName)).toEqual(['Mine'])
-		expect(listed[0]).toMatchObject({ ref: mine.agent.ref, canCreateBoards: true, rooms: [] })
+		expect(listed[0]).toMatchObject({ ref: mine.agent.ref, canCreateBoards: true, rooms: mine.agent.rooms })
 		expect((await f.anonymous.get(`${ACCESS}?scope=creators`)).statusCode).toBe(401)
 	})
 
@@ -594,11 +600,11 @@ describe('managing board-creating credentials (the Agents page)', () => {
 		const boardId = (await createBoard(mine.token)).json().boardId as string
 		const listed = (await f.owner.get(`${ACCESS}?boardId=${boardId}`)).json().agents as Array<Record<string, any>>
 		expect(listed.map((agent) => agent.ref)).toEqual([mine.agent.ref])
-		expect(listed[0].rooms).toEqual([boardId])
+		expect(listed[0].rooms).toEqual([...mine.agent.rooms, boardId])
 		expect((await f.nonmember.get(`${ACCESS}?boardId=${boardId}`)).statusCode).toBe(404)
 	})
 
-	it('never lets someone other than the credential\'s owner rotate or revoke it, even though it holds no boards to compare', async () => {
+	it('never lets someone other than the credential\'s owner rotate or revoke it', async () => {
 		const mine = await makeCreator(f.owner)
 		const bytes = storeBytes()
 		for (const identity of [f.nonmember, f.editor, f.viewer]) {
@@ -616,7 +622,7 @@ describe('managing board-creating credentials (the Agents page)', () => {
 		const rotated = await f.owner.post(`${ACCESS}/${mine.agent.ref}/rotate`, {})
 		expect(rotated.statusCode, rotated.body).toBe(200)
 		const body = rotated.json() as { agent: Record<string, any>; token: string }
-		expect(body.agent).toMatchObject({ canCreateBoards: true, rooms: [boardId] })
+		expect(body.agent).toMatchObject({ canCreateBoards: true, rooms: [...mine.agent.rooms, boardId] })
 		expect(body.token).not.toBe(mine.token)
 		expect((await createBoard(mine.token)).statusCode).toBe(401)
 		expect((await f.app.inject({ method: 'GET', url: `/api/rooms/${boardId}/canvas`, headers: { authorization: bearer(mine.token) } })).statusCode).toBe(401)
@@ -643,12 +649,12 @@ describe('managing board-creating credentials (the Agents page)', () => {
 		expect(storeBytes()).toBe(bytes)
 	})
 
-	it('leaves one audit row for a creator that holds no boards, and one per board for one that does', async () => {
+	it('leaves one audit row per board held by each creator', async () => {
 		const empty = await makeCreator(f.owner, { displayName: 'Empty' })
 		await f.owner.delete(`${ACCESS}/${empty.agent.ref}`)
 		const revokedEmpty = eventsOf('agent.revoked')
 		expect(revokedEmpty).toHaveLength(1)
-		expect(revokedEmpty[0].board_id).toBeNull()
+		expect(revokedEmpty[0].board_id).toBe(empty.agent.rooms[0])
 		expect(JSON.parse(revokedEmpty[0].metadata_json)).toMatchObject({ kind: 'board-creator' })
 
 		const busy = await makeCreator(f.owner, { displayName: 'Busy' })
@@ -657,8 +663,8 @@ describe('managing board-creating credentials (the Agents page)', () => {
 		const rotated = await f.owner.post(`${ACCESS}/${busy.agent.ref}/rotate`, {})
 		expect(rotated.statusCode).toBe(200)
 		const rotations = eventsOf('agent.rotated')
-		expect(rotations).toHaveLength(2)
-		expect(new Set(rotations.map((event) => event.board_id)).size).toBe(2)
+		expect(rotations).toHaveLength(3)
+		expect(new Set(rotations.map((event) => event.board_id)).size).toBe(3)
 		expect(JSON.stringify(rotations)).not.toMatch(/[A-Za-z0-9_-]{43}|[0-9a-f]{64}/)
 	})
 })

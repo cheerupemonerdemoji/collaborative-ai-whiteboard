@@ -1,5 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { apiRequest } from '../auth'
+import { type DisplayTheme } from '../display-theme'
 import { HistoricalCanvas } from './HistoricalCanvas'
 import '../account-history.css'
 
@@ -40,6 +41,7 @@ interface SnapshotResponse {
 export interface HistoryPanelProps {
 	boardId: string
 	canRestore: boolean
+	displayTheme: DisplayTheme
 	knownActors?: readonly HistoryActor[]
 	expectedClock?: number | null
 	getExpectedClock?: () => number | Promise<number>
@@ -88,6 +90,10 @@ function describeEvent(event: HistoryEvent) {
 		'checkpoint.created': 'created a checkpoint', 'restore.started': 'started restoring an earlier version',
 		'restore.completed': 'restored an earlier version', 'permissions.changed': 'changed sharing permissions',
 		'collaborator.added': 'added a collaborator', 'collaborator.removed': 'removed a collaborator',
+			'cad.model.created': 'added a CAD model', 'cad.revision.added': 'added a CAD revision',
+			'cad.revision.status_changed': 'changed a CAD review status', 'cad.comment.added': 'commented on a CAD revision',
+			'cad.evidence.added': 'linked evidence to a CAD model',
+			'cad.component.linked': 'linked a component to a CAD assembly', 'cad.component.unlinked': 'removed a component link from a CAD assembly',
 	}
 	const description = descriptions[event.eventType] ?? eventLabel(event.eventType).toLowerCase()
 	return objectName ? `${description}: “${objectName}”` : description
@@ -97,7 +103,7 @@ function sourceSymbol(source: HistorySource) {
 	return source === 'ai' ? '✦' : source === 'system' ? '⚙' : '●'
 }
 
-export function HistoryPanel({ boardId, canRestore, knownActors = [], expectedClock, getExpectedClock, onClose, onRestored }: HistoryPanelProps) {
+export function HistoryPanel({ boardId, canRestore, displayTheme, knownActors = [], expectedClock, getExpectedClock, onClose, onRestored }: HistoryPanelProps) {
 	const [events, setEvents] = useState<HistoryEvent[]>([])
 	const [serverActors, setServerActors] = useState<HistoryActor[]>([])
 	const [nextCursor, setNextCursor] = useState<number | string | null>(null)
@@ -256,6 +262,7 @@ export function HistoryPanel({ boardId, canRestore, knownActors = [], expectedCl
 		{selectedEvent && snapshot !== null ? <HistoricalCanvas
 			snapshot={snapshot}
 			selectedAt={selectedEvent.createdAt}
+			displayTheme={displayTheme}
 			onReturnToLive={returnToLive}
 			actions={<>
 				<div className="aw-version-nav">

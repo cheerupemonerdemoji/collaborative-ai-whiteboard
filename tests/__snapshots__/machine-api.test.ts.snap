@@ -2,17 +2,25 @@
 
 exports[`machine hostname: only the machine API is served > the allowlist is the operations that accept a board-scoped bearer token, plus exactly one account-level operation: board creation 1`] = `
 [
+  "GET ^\\/api\\/agent-session$",
   "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/checkpoints$",
   "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/history$",
   "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/history\\/\\d{1,15}\\/snapshot$",
+  "GET ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/shapes\\/shape(?::|%3[Aa])[A-Za-z0-9_-]{1,80}\\/history$",
   "GET ^\\/api\\/health$",
   "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/canvas$",
   "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/layout$",
   "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/semantic-context$",
+  "GET ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/shapes\\/shape(?::|%3[Aa])[A-Za-z0-9_-]{1,80}$",
   "POST ^\\/api\\/agent-boards$",
+  "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/cad-machine\\/artifacts\\/(?:glb|stl|step|thumbnail)$",
+  "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/cad-machine\\/models$",
   "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/checkpoints$",
+  "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/images$",
   "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/restore$",
+  "POST ^\\/api\\/boards\\/[A-Za-z0-9_-]{1,80}\\/shapes\\/shape(?::|%3[Aa])[A-Za-z0-9_-]{1,80}\\/restore$",
   "POST ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/actions$",
   "POST ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/ai\\/events$",
+  "POST ^\\/api\\/rooms\\/[A-Za-z0-9_-]{1,80}\\/pages$",
 ]
 `;

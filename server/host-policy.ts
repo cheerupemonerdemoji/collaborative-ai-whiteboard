@@ -79,25 +79,38 @@ export function hostPolicyFromEnv(env: NodeJS.ProcessEnv, verifier: (teamDomain:
 
 interface MachineRoute { method: 'GET' | 'POST'; pattern: RegExp }
 const ID = '[A-Za-z0-9_-]{1,80}'
+/** A shape id as it appears in a path: the colon may arrive encoded. */
+const SHAPE = 'shape(?::|%3[Aa])[A-Za-z0-9_-]{1,80}'
 
 /**
  * The complete set of operations a machine client may call. Derived from the routes that already
  * accept a board-scoped bearer token; anything else (login, registration, invitations, boards,
  * members, uploads, assets, evidence-table writes, WebSockets, the browser shell) is not served on
- * the machine hostname at all.
+ * the machine hostname at all. The one upload exception is the two cad-machine routes below.
  */
 export const MACHINE_ROUTES: readonly MachineRoute[] = [
 	{ method: 'GET', pattern: /^\/api\/health$/ },
 	{ method: 'GET', pattern: new RegExp(`^/api/rooms/${ID}/canvas$`) },
+	{ method: 'POST', pattern: new RegExp(`^/api/rooms/${ID}/pages$`) },
 	{ method: 'POST', pattern: new RegExp(`^/api/rooms/${ID}/actions$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/rooms/${ID}/semantic-context$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/rooms/${ID}/layout$`) },
+	{ method: 'GET', pattern: new RegExp(`^/api/rooms/${ID}/shapes/${SHAPE}$`) },
+	{ method: 'GET', pattern: new RegExp(`^/api/boards/${ID}/shapes/${SHAPE}/history$`) },
+	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/shapes/${SHAPE}/restore$`) },
+	{ method: 'GET', pattern: /^\/api\/agent-session$/ },
 	{ method: 'POST', pattern: new RegExp(`^/api/rooms/${ID}/ai/events$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/boards/${ID}/history$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/boards/${ID}/history/\\d{1,15}/snapshot$`) },
 	{ method: 'GET', pattern: new RegExp(`^/api/boards/${ID}/checkpoints$`) },
 	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/checkpoints$`) },
 	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/restore$`) },
+	// CAD upload for a credential holding the `cad-upload` capability on this one board (the machine CAD upload design note).
+	// Both routes check the capability themselves; the human CAD routes under /api/boards/:id/cad-* stay off this hostname.
+	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/cad-machine/artifacts/(?:glb|stl|step|thumbnail)$`) },
+	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/cad-machine/models$`) },
+	// Image upload for a credential with write access to this board (the agent images and links design note). Checked in the route.
+	{ method: 'POST', pattern: new RegExp(`^/api/boards/${ID}/images$`) },
 	// Account-level, not board-scoped: a board-creating credential makes a new board it owns nothing of yet.
 	{ method: 'POST', pattern: /^\/api\/agent-boards$/ },
 ]

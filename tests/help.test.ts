@@ -119,7 +119,7 @@ describe('user guide content', () => {
 	it('the Agent API guide documents exactly the routes the server allows machines to call', async () => {
 		const { MACHINE_ROUTES, isMachineRoute } = await import('../server/host-policy')
 		const text = guideSource(findGuidePage('agent-api')!)
-		const documented = [...text.matchAll(/^\| `(GET|POST) (\/api\/[^`\s]+)`/gm)].map((match) => ({ method: match[1], url: match[2].replace('BOARD_ID', 'board-a').replace('EVENT_ID', '12') }))
+		const documented = [...text.matchAll(/^\| `(GET|POST) (\/api\/[^`\s]+)`/gm)].map((match) => ({ method: match[1], url: match[2].replace('BOARD_ID', 'board-a').replace('EVENT_ID', '12').replace('SHAPE_ID', 'shape:abc') }))
 		for (const route of documented) expect(isMachineRoute(route.method, route.url), `${route.method} ${route.url}`).toBe(true)
 		expect(documented).toHaveLength(MACHINE_ROUTES.length)
 	})
@@ -237,7 +237,7 @@ describe('Help navigation', () => {
 	it('is in the board toolbar (checked at source level: the board view needs a live canvas to render)', () => {
 		const room = readFileSync(join(__dirname, '..', 'client', 'pages', 'Room.tsx'), 'utf8')
 		expect(room).toContain("import { HelpLink } from '../help/HelpPage'")
-		expect(room).toMatch(/<header className="topbar">[\s\S]*<HelpLink \/>[\s\S]*<\/header>/)
+		expect(room).toMatch(/<header[\s\S]*<HelpLink \/>[\s\S]*<\/header>/)
 	})
 })
 

@@ -68,11 +68,15 @@ Select something and press **Delete** (or **Backspace**), or use the trash butto
 
 When other people have the same board open, you see their cursors moving on the canvas in real time. Changes appear for everyone as they are made. Two people can edit different shapes at once without getting in each other's way.
 
+The header shows **Live** when connected and **Reconnecting…** when the connection drops. Keep the tab open during a disconnect: the canvas catches up automatically when the connection returns. Collaborator cursors and avatars use their account display names.
+
+Everyone keeps their own page, pan, and zoom. If a new drawing is outside your view, open the same page and use **Shift + 1** to fit its contents, or select a collaborator from the avatars to follow their view. Live updates do not move your camera while you work.
+
 Whether you can change things depends on your role on the board. **Viewers** can look around and use the Inspector and History to read, but cannot change the canvas. See [Roles & Sharing](roles-and-sharing.md).
 
 ## Saving and reloading
 
-You never need to press Save. Every change is stored as you make it. If you reload the page, close the tab, or come back tomorrow, the canvas is exactly as you left it.
+You never need to press Save. While connected, changes are sent to the server automatically. During a disconnect, keep the tab open until it reconnects; closing or reloading can lose edits that have not reached the server.
 
 One thing to know: after a reload the view may not be positioned where you left it. Press **Shift + 1** to bring everything back into view.
 

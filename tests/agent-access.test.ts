@@ -394,12 +394,16 @@ describe('listing agents', () => {
 		expect(otherView.body).not.toContain(f.boardId)
 	})
 
-	it('does not let an owner read another board\'s agents by naming that board', async () => {
+	// The fixture's `owner` is the installation administrator (the site owner), so the ordinary-owner rules are
+	// exercised from the non-administrator `nonmember` account, which owns 'other-owners-board'. The site owner's
+	// behaviour is covered separately under 'the site owner'.
+	it('does not let an ordinary owner read another board\'s agents by naming that board', async () => {
 		await createOtherOwnersBoard()
 		await createAgent({}, f.nonmember, 'other-owners-board')
+		await createAgent()
 
-		expect((await f.owner.get(listUrl('other-owners-board'))).statusCode).toBe(404)
-		expect((await f.owner.get(listUrl())).json()).toEqual({ agents: [] })
+		expect((await f.nonmember.get(listUrl())).statusCode).toBe(404)
+		expect((await f.nonmember.get(listUrl('other-owners-board'))).json().agents).toHaveLength(1)
 	})
 })
 
@@ -436,25 +440,23 @@ describe('revoking an agent', () => {
 
 	it('cannot reach an agent that belongs to another owner\'s board, even with its exact reference', async () => {
 		await createOtherOwnersBoard()
-		const theirs = await createAgent({}, f.nonmember, 'other-owners-board')
+		const theirs = await createAgent()
 
-		const response = await f.owner.delete(`${BASE}/${theirs.agent.ref}`)
+		const response = await f.nonmember.delete(`${BASE}/${theirs.agent.ref}`)
 
 		expect(response.statusCode).toBe(404)
-		expect(authorizeApiToken(bearer(theirs.token), 'other-owners-board', 'read')).toBe(theirs.agent.name)
+		expect(authorizeApiToken(bearer(theirs.token), f.boardId, 'read')).toBe(theirs.agent.name)
 	})
 
-	it('refuses to revoke an agent that also reaches a board the caller does not own, from either owner\'s side', async () => {
+	it('refuses an ordinary owner who tries to revoke an agent that also reaches a board they do not own', async () => {
 		await createOtherOwnersBoard()
 		const { token } = await createClient({ file: storeFile, name: 'spans-both', rooms: [f.boardId, 'other-owners-board'], access: 'read' })
 		const ref = refFor('spans-both', sha256(token))
 
-		const fromFirst = await f.owner.delete(`${BASE}/${ref}`)
 		const fromSecond = await f.nonmember.delete(`${BASE}/${ref}`)
 
-		expect(fromFirst.statusCode).toBe(403)
 		expect(fromSecond.statusCode).toBe(403)
-		expect(fromFirst.json().error).toMatch(/administrator/)
+		expect(fromSecond.json().error).toMatch(/administrator/)
 		expect(authorizeApiToken(bearer(token), f.boardId, 'read')).toBe('spans-both')
 		expect(authorizeApiToken(bearer(token), 'other-owners-board', 'read')).toBe('spans-both')
 	})
@@ -624,13 +626,12 @@ describe('rotating an agent', () => {
 
 	it('applies the ownership rule: 404 for a stranger\'s agent, 403 for one that also reaches a board the caller does not own', async () => {
 		await createOtherOwnersBoard()
-		const theirs = await createAgent({}, f.nonmember, 'other-owners-board')
+		const theirs = await createAgent()
 		const { token } = await createClient({ file: storeFile, name: 'spans-both', rooms: [f.boardId, 'other-owners-board'], access: 'read' })
 		const spans = refFor('spans-both', sha256(token))
 		const before = storeBytes()
 
-		expect((await f.owner.post(`${BASE}/${theirs.agent.ref}/rotate`, {})).statusCode).toBe(404)
-		expect((await f.owner.post(`${BASE}/${spans}/rotate`, {})).statusCode).toBe(403)
+		expect((await f.nonmember.post(`${BASE}/${theirs.agent.ref}/rotate`, {})).statusCode).toBe(404)
 		expect((await f.nonmember.post(`${BASE}/${spans}/rotate`, {})).statusCode).toBe(403)
 		expect(storeBytes()).toBe(before)
 	})
@@ -731,6 +732,41 @@ describe('the request budget', () => {
 	})
 })
 
+describe('the agent API address', () => {
+	it('is for signed-in people only', async () => {
+		expect((await f.anonymous.get(`${BASE}/config`)).statusCode).toBe(401)
+	})
+
+	it('is the address the owner is already using, with no Cloudflare layer, when no machine hostname is configured', async () => {
+		const response = await f.owner.get(`${BASE}/config`)
+
+		expect(response.statusCode).toBe(200)
+		expect(response.json()).toMatchObject({ viaCloudflare: false })
+		expect((response.json() as { agentGuideUrl: string }).agentGuideUrl).toMatch(/^http:\/\/[^/]+\/agent-guide\.md$/)
+		expect((response.json() as { agentApiOrigin: string }).agentApiOrigin).toMatch(/^http:\/\/[^/]+$/)
+	})
+
+	it('is the machine hostname over https when one is configured, and carries no secret', async () => {
+		const directory = mkdtempSync(join(tmpdir(), 'agent-access-config-'))
+		const accessVerifier: AccessVerifier = { async verify() { return { ok: false, reason: 'invalid' } } }
+		const app = await buildApp({ dataDirectory: directory, clientDirectory: directory, logger: false, hostPolicy: { publicHost: 'whiteboard.example.test', machineHost: 'whiteboard-api.example.test', accessVerifier } })
+		try {
+			const registered = await app.inject({ method: 'POST', url: '/api/auth/register', headers: { host: 'whiteboard.example.test', origin: 'http://127.0.0.1:8787' }, payload: { login: 'owner', displayName: 'Owner', password: 'correct horse battery staple' } })
+			const cookie = `${registered.cookies[0].name}=${registered.cookies[0].value}`
+
+			const response = await app.inject({ method: 'GET', url: `${BASE}/config`, headers: { host: 'whiteboard.example.test', cookie } })
+
+			expect(response.statusCode).toBe(200)
+			expect(response.json()).toMatchObject({ agentApiOrigin: 'https://whiteboard-api.example.test', viaCloudflare: true })
+		// The guide is read on the hostname this person is already using, never on the Cloudflare-gated machine one.
+		expect((response.json() as { agentGuideUrl: string }).agentGuideUrl).toMatch(/^https?:\/\/whiteboard\.example\.test\/agent-guide\.md$/)
+		} finally {
+			await app.close()
+			rmSync(directory, { recursive: true, force: true })
+		}
+	})
+})
+
 describe('the machine hostname and the browser hostname', () => {
 	const MACHINE_HOST = 'whiteboard-api.example.test'
 	const HUMAN_HOST = 'whiteboard.example.test'
@@ -764,5 +800,95 @@ describe('the machine hostname and the browser hostname', () => {
 			await app.close()
 			rmSync(directory, { recursive: true, force: true })
 		}
+	})
+})
+
+describe('the site owner (the administrator)', () => {
+	// `f.owner` is the installation administrator; `f.nonmember` is an ordinary account that owns 'other-owners-board'.
+	const marked = (row: { metadata_json: string }) => JSON.parse(row.metadata_json)
+
+	it('replaces another owner\'s lost token: the new one works, the old one is dead, and nobody can read either back', async () => {
+		await createOtherOwnersBoard()
+		const theirs = await createAgent({ displayName: 'their agent' }, f.nonmember, 'other-owners-board')
+		expect(authorizeApiToken(bearer(theirs.token), 'other-owners-board', 'read')).toBe(theirs.agent.name)
+
+		const listed = await f.owner.get(listUrl('other-owners-board'))
+		expect(listed.statusCode).toBe(200)
+		expect(listed.body).not.toContain(theirs.token)
+		expect(listed.body).not.toContain(sha256(theirs.token))
+		expect(listed.json().agents[0]).toMatchObject({ ref: theirs.agent.ref, rooms: ['other-owners-board'], sharedWithOtherBoards: false })
+
+		const rotated = await f.owner.post(`${BASE}/${theirs.agent.ref}/rotate`, {})
+		expect(rotated.statusCode, rotated.body).toBe(200)
+		const fresh = rotated.json().token as string
+		expect(fresh).not.toBe(theirs.token)
+		expect(authorizeApiToken(bearer(fresh), 'other-owners-board', 'read')).toBe(theirs.agent.name)
+		expect(authorizeApiToken(bearer(theirs.token), 'other-owners-board', 'read')).toBeNull()
+		expect(authorizeApiToken(bearer(fresh), f.boardId, 'read')).toBeNull()
+
+		const events = (await accountEvents()).filter((row) => row.type === 'agent.rotated')
+		expect(events).toHaveLength(1)
+		expect(events[0].actor_user_id).toBe(f.owner.userId)
+		expect(marked(events[0])).toMatchObject({ actorKind: 'site-owner', accessVia: 'site-owner' })
+		expect(events[0].metadata_json).not.toContain(fresh)
+	})
+
+	it('revokes another owner\'s agent, and can still touch one that also reaches boards the owner does not own', async () => {
+		await createOtherOwnersBoard()
+		const theirs = await createAgent({}, f.nonmember, 'other-owners-board')
+		expect((await f.owner.delete(`${BASE}/${theirs.agent.ref}`)).statusCode).toBe(200)
+		expect(authorizeApiToken(bearer(theirs.token), 'other-owners-board', 'read')).toBeNull()
+
+		const { token } = await createClient({ file: storeFile, name: 'spans-both', rooms: [f.boardId, 'other-owners-board'], access: 'read' })
+		const spans = refFor('spans-both', sha256(token))
+		expect((await f.owner.post(`${BASE}/${spans}/rotate`, {})).statusCode).toBe(200)
+		expect(authorizeApiToken(bearer(token), f.boardId, 'read')).toBeNull()
+		expect((await accountEvents()).filter((row) => row.type === 'agent.revoked').every((row) => marked(row).actorKind === 'site-owner')).toBe(true)
+	})
+
+	it('can rotate and revoke another account\'s board-creating credential, and lists it where it holds a board', async () => {
+		const created = await f.nonmember.post(BASE, { kind: 'board-creator', displayName: 'Planner', access: 'read-write-history' })
+		expect(created.statusCode, created.body).toBe(201)
+		const { agent, board, token } = created.json() as { agent: { ref: string }; board: { id: string }; token: string }
+
+		const ownersView = await f.owner.get(listUrl(board.id))
+		expect(ownersView.statusCode).toBe(200)
+		expect(ownersView.json().agents[0]).toMatchObject({ ref: agent.ref, canCreateBoards: true })
+
+		const rotated = await f.owner.post(`${BASE}/${agent.ref}/rotate`, {})
+		expect(rotated.statusCode, rotated.body).toBe(200)
+		expect(rotated.json().agent.canCreateBoards).toBe(true)
+		expect(authorizeApiToken(bearer(token), board.id, 'read')).toBeNull()
+		expect(authorizeApiToken(bearer(rotated.json().token), board.id, 'read')).not.toBeNull()
+		const row = (await accountEvents()).filter((event) => event.type === 'agent.rotated').at(-1)!
+		expect(marked(row)).toMatchObject({ actorKind: 'site-owner', kind: 'board-creator' })
+	})
+
+	it('can create an agent on a board it does not own, marked as such, but not on a board that does not exist', async () => {
+		await createOtherOwnersBoard()
+		const made = await f.owner.post(BASE, { boardId: 'other-owners-board', displayName: 'made by site owner', access: 'read' })
+		expect(made.statusCode, made.body).toBe(201)
+		const row = (await accountEvents()).filter((event) => event.type === 'agent.created').at(-1)!
+		expect(row.actor_user_id).toBe(f.owner.userId)
+		expect(marked(row)).toMatchObject({ actorKind: 'site-owner' })
+
+		expect((await f.owner.post(BASE, { boardId: 'no-such-board', displayName: 'x', access: 'read' })).statusCode).toBe(404)
+		expect((await f.owner.get(listUrl('no-such-board'))).statusCode).toBe(404)
+	})
+
+	it('does not mark rows for the administrator acting on their own board, and gives no one else the same reach', async () => {
+		await createOtherOwnersBoard()
+		const mine = await createAgent()
+		expect((await f.owner.post(`${BASE}/${mine.agent.ref}/rotate`, {})).statusCode).toBe(200)
+		const rotation = (await accountEvents()).filter((row) => row.type === 'agent.rotated')
+		expect(rotation).toHaveLength(1)
+		expect(marked(rotation[0])).not.toHaveProperty('actorKind')
+
+		const before = storeBytes()
+		for (const identity of [f.editor, f.viewer, f.nonmember]) {
+			expect((await identity.post(`${BASE}/${mine.agent.ref}/rotate`, {})).statusCode, identity.role).toBeGreaterThanOrEqual(403)
+			expect((await identity.delete(`${BASE}/${mine.agent.ref}`)).statusCode, identity.role).toBeGreaterThanOrEqual(403)
+		}
+		expect(storeBytes()).toBe(before)
 	})
 })

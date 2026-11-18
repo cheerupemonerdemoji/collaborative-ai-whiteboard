@@ -134,9 +134,10 @@ membership -- it has its *own* scoped grant instead. See
 #### Board-creating credentials
 
 A second kind of machine credential can create new boards (`POST /api/agent-boards`). It is recorded in the token
-file's separate `accountClients` collection with an `ownerUserId` and the account-level capability `board:create`,
-and it starts with no boards. It authenticates only on the machine hostname (after Cloudflare Access), never with a
-session cookie, and grants nothing on any board that existed before it. Each board it creates is owned by the named
+file's separate `accountClients` collection with an `ownerUserId` and the account-level capability `board:create`.
+The human creation flow provisions and grants a same-named first board; legacy/operator-created records may still
+hold none. It authenticates only on the machine hostname (after Cloudflare Access), never with a session cookie, and
+grants nothing on any board that existed before it. Each board it creates is owned by the named
 human, is added to that credential's boards in the same locked token-store operation (board first, then grant, with a
 soft-delete compensation if the grant cannot be persisted), and carries the permissions the owner configured.
 
@@ -161,6 +162,26 @@ bearer is refused, viewers get 403, non-members 404), is rate limited per user a
 size only when the reported fingerprint equals one the **server recomputes** from the shape's current content. A forged or outdated
 report is counted as stale and discarded. The worst a malicious editor can do is mis-state a size for a shape they could already edit or delete,
 which makes layout reads for that shape wrong, not insecure. Sizes are bounded (1–50,000) and never written into the tldraw document.
+
+### 7b. Lossless editing, shape history and targeted recovery
+
+The incident behind this section: an agent replaced a 3,230-character browser-written text with a shorter one because a canvas read showed a 500-character, paragraph-flattened preview
+that did not say it was one. The rule now enforced is that a lossy representation never silently authorizes a destructive replacement.
+
+- **Preview honesty.** Every text-bearing canvas object reports `textTruncated`, `originalLength`, `revision`, `contentLossy` and `lossReasons`. `contentLossy` covers omitted
+  paragraph structure and formatting, not just length.
+- **Guarded replacement.** `update_text` against lossy content is refused unless the caller proves a lossless read (`expectedContentDigest`, which only the lossless shape read returns)
+  or explicitly acknowledges the loss (`overwriteTruncatedSource`). Either way `expectedRevision` is required and enforced, so an acknowledgement never bypasses concurrency. The
+  digest is a correctness check, not a secret; it is withheld from lossy responses so it cannot be copied without reading the full content.
+- **Recovery authority.** Recovering one shape needs `history` and `write` (as creating a checkpoint does); a `dryRun` preview needs only `history`. Board-wide `restore` is a different,
+  much broader power and is not implied. A `history` + `write` token can already read every earlier version and write text, so shape recovery grants it no new reach: it can write back
+  an earlier version it could already read. The accepted residual is that content a person deliberately removed from a shape stays in History and can be written back by such a token.
+- **Blast radius.** A recovery writes one record's rich text (or, in `content-and-placement`, its position and properties) in one room transaction, requires the revision the caller inspected,
+  and cannot touch another record. The damaging edit stays in History; the recovery is a later `object.edited` event marked with recovery metadata and attributed to the actor.
+- **Disclosure.** Shape History returns complete earlier content to `history` holders, the same material `GET /history` already returns; it adds no new reader. The lossless read is gated by `read`.
+- **Diagnostics.** `GET /api/agent-session` is machine-only (a cookie is never consulted), rate limited, and returns the caller's own effective permissions and expiry, never a hash, fingerprint or secret.
+- **Scope changes.** Rotation can change an agent's access only for its board owner, in one locked store mutation with the new hash (the old bearer is dead at once), audited with old and new scopes.
+  Adding `restore` requires an explicit acknowledgement; history and write never imply it.
 
 ### 8. Engineering-entity semantic layer
 

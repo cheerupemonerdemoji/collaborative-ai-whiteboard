@@ -510,6 +510,15 @@ export class AuthDatabase {
 		return rows.map(mapBoardWithRole)
 	}
 
+	/** Every board regardless of membership. Callers must already have established site-owner authority. */
+	listAllBoards(includeDeleted: boolean): BoardRecord[] {
+		const rows = this.database.prepare(`
+			SELECT * FROM boards WHERE (? = 1 OR deleted_at IS NULL)
+			ORDER BY updated_at DESC, id ASC
+		`).all(includeDeleted ? 1 : 0) as BoardRow[]
+		return rows.map(mapBoard)
+	}
+
 	renameBoard(id: string, name: string, at: string): boolean {
 		return this.database.prepare('UPDATE boards SET name = ?, updated_at = ? WHERE id = ?')
 			.run(name, at, id).changes === 1
@@ -628,6 +637,11 @@ export class AuthDatabase {
 
 	registerBoardAsset(boardId: string, uploadId: string): void {
 		this.database.prepare('INSERT OR IGNORE INTO board_assets(upload_id, board_id) VALUES (?, ?)').run(uploadId, boardId)
+	}
+
+	/** Removes one board's registration of an asset. Used only to undo a registration whose file write failed. */
+	unregisterBoardAsset(boardId: string, uploadId: string): void {
+		this.database.prepare('DELETE FROM board_assets WHERE board_id = ? AND upload_id = ?').run(boardId, uploadId)
 	}
 
 	/** Used only by the evidence-tables artifact-count cap (server/app.ts) - a cheap, proportionate

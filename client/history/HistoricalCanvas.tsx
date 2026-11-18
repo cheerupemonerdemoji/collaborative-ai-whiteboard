@@ -1,12 +1,19 @@
 import { type ReactNode, useMemo } from 'react'
 import { Tldraw } from 'tldraw'
+import { cadReviewShapeUtils } from '../cad/CadReviewShape'
+import { telemetryCardShapeUtils } from '../telemetry/TelemetryCardShape'
+import { chartShapeUtils } from '../charts/ChartShape'
+import { type DisplayTheme } from '../display-theme'
 import { multiplayerAssetStore } from '../multiplayerAssetStore'
 import { createHistoricalStore } from './historicalStore'
 import '../account-history.css'
 
+/** A telemetry card in a past version has no board context, so it shows no live data. */
+const historicalShapeUtils = [...cadReviewShapeUtils, ...telemetryCardShapeUtils, ...chartShapeUtils]
 export interface HistoricalCanvasProps {
 	snapshot: unknown
 	selectedAt: number | string
+	displayTheme: DisplayTheme
 	onReturnToLive(): void
 	actions?: ReactNode
 }
@@ -16,7 +23,7 @@ function formatDate(value: number | string) {
 	return Number.isNaN(date.valueOf()) ? 'Unknown time' : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' }).format(date)
 }
 
-export function HistoricalCanvas({ snapshot, selectedAt, onReturnToLive, actions }: HistoricalCanvasProps) {
+export function HistoricalCanvas({ snapshot, selectedAt, displayTheme, onReturnToLive, actions }: HistoricalCanvasProps) {
 	const prepared = useMemo(() => {
 		try {
 			return { store: createHistoricalStore(snapshot, multiplayerAssetStore), error: null }
@@ -33,8 +40,11 @@ export function HistoricalCanvas({ snapshot, selectedAt, onReturnToLive, actions
 		<div className="aw-history-canvas">
 			{prepared.store ? <Tldraw
 				store={prepared.store}
+				shapeUtils={historicalShapeUtils}
+				colorScheme={displayTheme}
 				hideUi
 				onMount={(editor) => {
+					editor.user.updateUserPreferences({ colorScheme: displayTheme })
 					editor.updateInstanceState({ isReadonly: true })
 					editor.zoomToFit()
 				}}

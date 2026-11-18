@@ -5,18 +5,138 @@
 * { box-sizing: border-box; }
 body { margin: 0; overscroll-behavior: none; }
 button { font: inherit; border: 1px solid #d8deea; border-radius: 8px; padding: 7px 11px; background: white; color: #27334b; cursor: pointer; }
-.app-shell { position: fixed; inset: 0; display: grid; grid-template-rows: 54px 1fr; }
-.topbar { display: flex; align-items: center; gap: 10px; padding: 0 14px; background: #fff; border-bottom: 1px solid #dce2ec; z-index: 2; }
-.brand { font-weight: 750; margin-right: 14px; display: flex; align-items: center; gap: 9px; }
+.room-root { position: fixed; inset: 0; }
+.app-shell { position: fixed; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+.topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 8px 14px; background: #fff; border-bottom: 1px solid #dce2ec; z-index: 2; }
+.topbar .aw-room-menu-actions { display: contents; }
+.topbar .aw-room-menu-actions[hidden] { display: none; }
+.topbar .aw-menu-toggle { min-height: 44px; font-weight: 700; }
+.topbar.is-collapsed { flex-wrap: nowrap; }
+.topbar.is-collapsed .brand { min-width: 0; flex: 1 1 auto; margin-right: 0; }
+.topbar.is-collapsed .aw-brand-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar.is-collapsed .room-name, .topbar.is-collapsed .aw-role { display: none; }
+.topbar.is-collapsed .aw-mode-toggle { flex: 0 0 auto; }
+.brand { flex: 0 0 auto; font-weight: 750; margin-right: 14px; display: flex; align-items: center; gap: 9px; }
 .live-dot { width: 9px; height: 9px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 4px #dcfce7; }
-.room-name { flex: 1; color: #667085; font-size: 13px; }
+.aw-sync-status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 8px; font-size: 12px; white-space: nowrap; }
+.aw-sync-status .live-dot { flex: 0 0 9px; }
+.aw-sync-status[data-live='false'] .live-dot { background: #d97706; box-shadow: 0 0 0 4px #fef3c7; }
+.aw-sync-warning { position: absolute; top: 144px; left: 50%; transform: translateX(-50%); width: min(440px, calc(100% - 32px)); z-index: 4; padding: 10px 14px; border: 1px solid #d97706; border-radius: 10px; color: #78350f; background: #fffbeb; font-size: 13px; pointer-events: none; }
+.room-name { flex: 1 1 220px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #667085; font-size: 13px; }
 .workspace { min-height: 0; min-width: 0; background: white; }
 .canvas { position: relative; width: 100%; height: 100%; background: white; }
+.aw-view-mode-hint {
+	position: absolute;
+	top: 12px;
+	left: 50%;
+	translate: -50% 0;
+	z-index: 2;
+	pointer-events: none;
+	padding: 7px 11px;
+	border: 1px solid rgba(20, 108, 75, .24);
+	border-radius: 999px;
+	color: #146c4b;
+	background: rgba(232, 248, 240, .94);
+	box-shadow: 0 2px 8px rgba(15, 23, 42, .12);
+	font-size: 13px;
+	font-weight: 700;
+	white-space: nowrap;
+}
 .presenting .tlui-layout__top, .presenting .tlui-layout__bottom, .presenting .tlui-layout__left, .presenting .tlui-layout__right { display: none !important; }
-.topbar .aw-role { margin-left: auto; }
+.topbar .aw-role { margin-left: 0; }
+/* The display toggle, Help and the account menu stay together: they wrap as one unit and sit at the right edge of whichever row they land on, and wrap among themselves only when even a row of their own is too narrow. */
+.topbar .aw-topbar-end { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 10px; margin-left: auto; flex: 0 1 auto; max-width: 100%; }
 .topbar button, .topbar .aw-help-link { white-space: nowrap; }
 .topbar button.aw-active { border-color: #c7d2fe; background: #eef2ff; color: #4338ca; }
-@media (max-width: 900px) {
+.topbar .aw-mode-toggle {
+	font-weight: 700;
+	border-color: #86a4d8;
+	background: #eef5ff;
+	color: #1e3a68;
+}
+.topbar .aw-mode-toggle[data-mode='view'] {
+	border-color: #22a06b;
+	background: #e8f8f0;
+	color: #146c4b;
+}
+
+/* The room theme is presentation-only. tldraw handles canvas colors natively; these rules cover the app chrome and panels. */
+.room-root.theme-dark { color-scheme: dark; color: #f8fafc; background: #080b10; }
+.theme-dark .topbar { color: #f8fafc; background: #0f141c; border-bottom-color: #293241; }
+.theme-dark .room-name, .theme-dark .aw-user-menu small { color: #a8b3c4; }
+.theme-dark .workspace, .theme-dark .canvas, .theme-dark .aw-history-canvas { background: #080b10; }
+.theme-dark .aw-view-mode-hint { border-color: #34d399; color: #d1fae5; background: rgba(6, 78, 59, .94); }
+.theme-dark button, .theme-dark .aw-help-link {
+	border-color: #364152;
+	background: #18202c;
+	color: #f8fafc;
+}
+.theme-dark button:hover, .theme-dark .aw-help-link:hover { background: #232d3b; }
+.theme-dark button:focus-visible, .theme-dark .aw-help-link:focus-visible,
+.theme-dark input:focus-visible, .theme-dark select:focus-visible, .theme-dark textarea:focus-visible {
+	outline: 2px solid #93c5fd;
+	outline-offset: 2px;
+}
+.theme-dark .topbar button.aw-active { border-color: #818cf8; background: #312e81; color: #eef2ff; }
+.theme-dark .topbar .aw-mode-toggle { border-color: #60a5fa; background: #172554; color: #dbeafe; }
+.theme-dark .topbar .aw-mode-toggle[data-mode='view'] { border-color: #34d399; background: #064e3b; color: #d1fae5; }
+.theme-dark .aw-avatar { background: #312e81; color: #eef2ff; }
+.theme-dark .aw-role-owner { background: #4c1d95; color: #f5f3ff; }
+.theme-dark .aw-role-editor { background: #1e3a8a; color: #eff6ff; }
+.theme-dark .aw-role-viewer { background: #334155; color: #f8fafc; }
+.theme-dark .aw-history-panel, .theme-dark .aw-share-panel {
+	color: #f8fafc;
+	background: #0f141c;
+	border-color: #293241;
+	box-shadow: -12px 0 36px rgba(0, 0, 0, .42);
+}
+.theme-dark .aw-history-header, .theme-dark .aw-share-header,
+.theme-dark .aw-history-filters, .theme-dark .aw-inspector-filters,
+.theme-dark .aw-inspector-list section, .theme-dark .aw-inspector-table-section {
+	border-color: #293241;
+}
+.theme-dark .aw-history-header p, .theme-dark .aw-share-header p,
+.theme-dark .aw-share-hint, .theme-dark .aw-owner-label,
+.theme-dark .aw-history-filters label, .theme-dark .aw-inspector-filters label,
+.theme-dark .aw-inspector-form label, .theme-dark .aw-inspector-relation-form label,
+.theme-dark .aw-inspector-list h4, .theme-dark .aw-inspector-meta,
+.theme-dark .aw-inspector-fields dt, .theme-dark .aw-inspector-empty,
+.theme-dark .aw-inspector-empty-inline { color: #a8b3c4; }
+.theme-dark .aw-share-section h3, .theme-dark .aw-share-form label,
+.theme-dark .aw-event-body, .theme-dark .aw-inspector-row,
+.theme-dark .aw-inspector-fields dd, .theme-dark .aw-inspector-detail > h4 { color: #f8fafc; }
+.theme-dark .aw-event-body small, .theme-dark .aw-event-body code,
+.theme-dark .aw-inspector-meta code, .theme-dark .aw-inspector-id-row code { color: #94a3b8; }
+.theme-dark .aw-timeline-event:hover, .theme-dark .aw-inspector-row:hover { background: #18202c; }
+.theme-dark .aw-checkpoint-form, .theme-dark .aw-inspector-form,
+.theme-dark .aw-inspector-relation-form, .theme-dark .aw-inspector-table-editor {
+	background: #111827;
+	border-color: #475569;
+}
+.theme-dark .aw-member-row { background: #111827; border-color: #334155; }
+.theme-dark .aw-share-form select, .theme-dark .aw-share-form input,
+.theme-dark .aw-share-link input, .theme-dark .aw-member-controls select,
+.theme-dark .aw-history-filters select, .theme-dark .aw-checkpoint-form input,
+.theme-dark .aw-inspector-filters select, .theme-dark .aw-inspector-form input,
+.theme-dark .aw-inspector-form select, .theme-dark .aw-inspector-form textarea,
+.theme-dark .aw-inspector-relation-form select {
+	color: #f8fafc;
+	background: #080b10;
+	border-color: #475569;
+}
+.theme-dark .aw-share-link-row input, .theme-dark .aw-history-actions button,
+.theme-dark .aw-inspector-back { color: #c7d2fe; }
+.theme-dark .aw-inspector-relations li, .theme-dark .aw-inspector-table th,
+.theme-dark .aw-inspector-table td { border-color: #334155; }
+.theme-dark .aw-inspector-table th { background: #18202c; color: #dbe4f0; }
+.theme-dark .aw-inspector-table tbody tr:nth-child(even) { background: #111827; }
+.theme-dark .aw-history-loading { color: #c7d2fe; background: rgba(8, 11, 16, .92); }
+.theme-dark .aw-history-viewer { color: #f8fafc; background: #080b10; }
+.theme-dark .aw-history-viewer-header { color: #fef3c7; background: #20180a; border-bottom-color: #d97706; }
+.theme-dark .aw-history-viewer-header small { color: #fcd34d; }
+.theme-dark .aw-restore-confirm { color: #f8fafc; background: #111827; border-color: #ef4444; }
+.theme-dark .aw-snapshot-error span { color: #a8b3c4; }
+@media (max-width: 1180px) {
 	.app-shell { grid-template-rows: auto 1fr; }
 	.topbar { flex-wrap: wrap; height: auto; padding: 8px 10px; row-gap: 6px; }
 	.topbar .aw-role { margin-left: 0; }
@@ -28,6 +148,12 @@ button { font: inherit; border: 1px solid #d8deea; border-radius: 8px; padding: 
 	.topbar button { padding: 6px 9px; }
 	.topbar .brand { font-size: 13px; margin-right: 10px; }
 	.topbar .aw-user-menu > div:nth-child(2) { display: none; }
+	.topbar .aw-mode-toggle { min-height: 44px; padding-inline: 14px; }
+	.topbar.is-collapsed { gap: 6px; }
+	.topbar.is-collapsed .aw-menu-toggle { padding-inline: 9px; }
+	.topbar.is-collapsed .aw-mode-toggle { padding-inline: 10px; }
+	/* tldraw's page selector occupies the first row of the canvas on phones. */
+	.aw-view-mode-hint { top: 72px; padding: 8px 12px; font-size: 12px; }
 	.aw-user-menu .aw-avatar { width: 32px; height: 32px; }
 	.aw-history-panel { top: auto; right: 0; left: 0; bottom: 0; width: 100%; max-height: min(78vh, 640px); border-top: 1px solid #dce2ec; border-left: 0; box-shadow: 0 -12px 36px rgba(15, 23, 42, .14); }
 	.aw-history-viewer-header { min-height: 0; }

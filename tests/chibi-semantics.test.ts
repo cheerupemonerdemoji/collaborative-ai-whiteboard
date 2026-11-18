@@ -23,13 +23,13 @@ import { buildApp, type BuildAppOptions } from '../server/app'
 
 /* -------------------------------------------------------- shared-schema pin -- */
 
-describe('existing visual actions are unaffected', () => {
-	it('pins the exact set and shape of canvasActionSchema tools (shared/ai.ts was not modified by this feature)', () => {
+describe('visual action schema', () => {
+	it('pins the exact action names, including bounded chart actions', () => {
 		const tools = (canvasActionSchema as unknown as { options: Array<{ shape: { tool: { value: string } } }> }).options
 			.map((option) => option.shape.tool.value)
 			.sort()
 		expect(tools).toEqual(
-			['connect_shapes', 'create_arrow', 'create_shape', 'create_text', 'delete_shape', 'move_shape', 'resize_shape', 'update_text'].sort()
+			['connect_shapes', 'create_arrow', 'create_chart', 'create_shape', 'create_text', 'delete_shape', 'move_shape', 'resize_shape', 'update_chart', 'update_text'].sort()
 		)
 	})
 })

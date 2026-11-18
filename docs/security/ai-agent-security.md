@@ -86,6 +86,13 @@ invalid reference partway through a batch rolls the whole batch back, so an
 AI client cannot leave a board in a partially-applied state by sending a
 malformed request.
 
+## A preview never authorizes a replacement
+
+A canvas read is a preview of a shape's text (one line, no formatting, at most 500 characters) and says so: `textTruncated`, `originalLength`, `revision`, `contentLossy`, `lossReasons`.
+`update_text` refuses to replace lossy content from that preview (`409 source_truncated` / `source_lossy`). To replace it a client must fetch the full shape and present the digest it returns,
+or explicitly set `overwriteTruncatedSource`; in both cases it must also send the `expectedRevision` it read, which is enforced. A `history` + `write` credential can recover one shape's earlier
+content without the board-wide `restore` scope, and any credential can read its own effective permissions from `GET /api/agent-session`.
+
 ## Every AI action is board-authorized, exactly like a human's
 
 A bearer token still has to pass `resolveBoardAccess` and the specific
@@ -140,8 +147,9 @@ and `tests/access-jwt.test.ts`.
 An owner can register an agent that creates its own boards. The credential is a different shape from a board token and
 is stored apart from them, in the token file's `accountClients` collection, so that "has at least one board" stays an
 invariant of the ordinary `clients` collection (a record with no boards there would make every reader reject the whole
-file). Its capability is `board:create`, it names an `ownerUserId`, and it begins with no boards. `POST /api/agent-boards`
-accepts only a strict `{name}` body, creates the board for the owner through the same service the human route uses, and
+file). Its capability is `board:create` and it names an `ownerUserId`. Creating one through the human Agents page also
+creates and grants its same-named first board; the collection still permits zero-board legacy/operator records.
+`POST /api/agent-boards` accepts only a strict `{name}` body, creates another board for the owner through the same service the human route uses, and
 adds exactly that board to the credential in the same locked operation. The credential never gains access to a board that
 existed before, including its owner's. The human `POST /api/boards` does not accept it, and it is not accepted on the
 browser hostname.

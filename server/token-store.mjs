@@ -87,6 +87,33 @@ export const MAX_ACCOUNT_CLIENTS = 20
 export const BOARD_CREATE_PERMISSION = 'board:create'
 
 /**
+ * A per-client capability, stored beside `permissions` (never inside it: the reader's `permissions` enum is
+ * four values wide, and a fifth would make an older server reject the whole file and lock every agent out).
+ * `cad-upload` lets one credential upload validated CAD artifacts and add a CAD model entry to ONE board. It is only
+ * ever minted by the operator CLI on the server (the HTTP agent-access routes cannot set it), only together with
+ * write access, and only for a single board. Review and approval stay with people. the machine CAD upload design note.
+ */
+export const CAD_UPLOAD_CAPABILITY = 'cad-upload'
+export const CLIENT_CAPABILITIES = [CAD_UPLOAD_CAPABILITY]
+
+/**
+ * A cad-upload credential must expire, within a fixed time. It is refused unless it carries an expiry no more than this far
+ * away, when it is minted, when it is rotated, and every time it is used (server/tokens.ts), so a longer or missing expiry
+ * can neither be minted nor be put in the file by hand and still work.
+ *
+ * The policy is 365 days: the longest expiry the Agents page offers any agent ("1 year"), so the capability never makes a
+ * credential's life shorter than an ordinary agent's, while a credential with NO expiry is still refused. It was 30 days when
+ * the capability shipped and was raised on 2026-11-08 at the board owner's request, to match his existing Otto agent token
+ * (the machine CAD upload design note, amendment). The checks allow one extra hour on top, because the expiry is worked
+ * out by whoever asks (the Agents page uses the browser's clock) and a browser a few seconds ahead of the server would
+ * otherwise be refused for choosing the page's own "1 year". The allowance is applied identically at mint, rotation and use,
+ * so a credential minted at the limit is never refused a moment later.
+ */
+export const CAD_UPLOAD_MAX_LIFETIME_DAYS = 365
+export const CAD_UPLOAD_CLOCK_ALLOWANCE_MS = 3_600_000
+export const CAD_UPLOAD_MAX_LIFETIME_MS = CAD_UPLOAD_MAX_LIFETIME_DAYS * 86_400_000 + CAD_UPLOAD_CLOCK_ALLOWANCE_MS
+
+/**
  * The most clients one store may hold. This is the reader's limit, not a policy choice: server/tokens.ts parses
  * the whole file with a schema capped at this many clients, and a file over the cap fails that parse as a
  * whole, so EVERY agent would be locked out at once, silently. The writer therefore refuses the client that
@@ -100,6 +127,45 @@ export function isValidClientName(value) {
 
 export function isValidRoomId(value) {
 	return typeof value === 'string' && ROOM_ID.test(value)
+}
+
+/**
+ * Validates the optional capability list on create. A capability is refused unless it is a known one, appears once, the
+ * credential can write, and it reaches exactly one board: the grant is deliberately the narrowest that works.
+ */
+function normaliseCapabilities(value, permissions, rooms, expiresAt, nowMs) {
+	if (value === undefined) return []
+	if (!Array.isArray(value) || value.length > CLIENT_CAPABILITIES.length || new Set(value).size !== value.length || !value.every((entry) => CLIENT_CAPABILITIES.includes(entry))) {
+		throw new TokenStoreError('invalid-capabilities', `Capabilities must be a list drawn from: ${CLIENT_CAPABILITIES.join(', ')}`)
+	}
+	if (value.length > 0 && !permissions.includes('write')) {
+		throw new TokenStoreError('invalid-capabilities', 'The cad-upload capability needs write access')
+	}
+	if (value.length > 0 && rooms.length !== 1) {
+		throw new TokenStoreError('invalid-capabilities', 'The cad-upload capability can be granted for exactly one board')
+	}
+	if (value.length > 0) requireBoundedExpiry(expiresAt, nowMs)
+	return [...value]
+}
+
+/** A stored client that carries the cad-upload capability. */
+function hasCadUpload(client) {
+	return Array.isArray(client.capabilities) && client.capabilities.includes(CAD_UPLOAD_CAPABILITY)
+}
+
+/**
+ * The expiry rule for a cad-upload credential, in one place (used when minting and rotating): an expiry that is present,
+ * well formed, still in the future, and no further away than the maximum lifetime. `expiresAt` is a canonical timestamp.
+ */
+function requireBoundedExpiry(expiresAt, nowMs) {
+	const at = typeof expiresAt === 'string' ? parseTimestamp(expiresAt) : null
+	if (at === null) {
+		throw new TokenStoreError('invalid-expiry', `A cad-upload credential needs an expiry no more than ${CAD_UPLOAD_MAX_LIFETIME_DAYS} days away`)
+	}
+	if (at <= nowMs) throw new TokenStoreError('invalid-expiry', 'Expiry must be in the future')
+	if (at - nowMs > CAD_UPLOAD_MAX_LIFETIME_MS) {
+		throw new TokenStoreError('invalid-expiry', `A cad-upload credential can last at most ${CAD_UPLOAD_MAX_LIFETIME_DAYS} days; choose an earlier expiry`)
+	}
 }
 
 export function isAccessMode(value) {
@@ -238,6 +304,8 @@ export function summariseClients(data) {
 		name: client.name,
 		rooms: client.rooms,
 		permissions: client.permissions,
+		// Only a client that holds a capability has this field, so every other row keeps exactly its original three fields.
+		...(Array.isArray(client.capabilities) && client.capabilities.length > 0 ? { capabilities: client.capabilities.filter((entry) => typeof entry === 'string') } : {}),
 	}))
 }
 
@@ -412,6 +480,7 @@ export async function createClient(request) {
 	const displayName = normaliseDisplayName(request.displayName)
 	const createdByUserId = normaliseCreator(request.createdByUserId)
 	const permissions = [...ACCESS_MODES[request.access]]
+	const capabilities = normaliseCapabilities(request.capabilities, permissions, rooms, expiresAt, now.getTime())
 	const token = randomBytes(32).toString('base64url')
 	const tokenHash = createHash('sha256').update(token).digest('hex')
 	await mutateStore(file, (data) => {
@@ -426,13 +495,14 @@ export async function createClient(request) {
 			tokenHash,
 			rooms,
 			permissions,
+			...(capabilities.length === 0 ? {} : { capabilities }),
 			createdAt,
 			...(expiresAt === undefined ? {} : { expiresAt }),
 			...(displayName === undefined ? {} : { displayName }),
 			...(createdByUserId === undefined ? {} : { createdByUserId }),
 		})
 	})
-	return { token, name, rooms, permissions, fingerprint: clientFingerprint(tokenHash), createdAt, ...(expiresAt === undefined ? {} : { expiresAt }) }
+	return { token, name, rooms, permissions, ...(capabilities.length === 0 ? {} : { capabilities }), fingerprint: clientFingerprint(tokenHash), createdAt, ...(expiresAt === undefined ? {} : { expiresAt }) }
 }
 
 /**
@@ -543,6 +613,11 @@ export async function revokeClient(file, name, options = {}) {
  * creation time and any metadata this version does not understand. The old token stops working at once, because
  * the old hash is gone. The record is stamped with `rotatedAt`.
  *
+ * Access is unchanged unless the caller supplies `access`, in which case the permissions become exactly that mode's, in the SAME locked
+ * mutation that replaces the hash: the old bearer is dead and the new bearer carries the new access, with no moment where either is wrong.
+ * Adding `restore` (board-wide rollback) to a client that did not hold it is refused unless `acknowledgeRestore` is true. History and write
+ * never imply restore. `previousPermissions` is returned so the caller can audit exactly what changed.
+ *
  * Expiry carries over. Rotating a client whose expiry has passed (or is unreadable) without supplying a new
  * `expiresAt` is refused, because it would hand back a token that is already dead. Supplying `expiresAt`
  * replaces the old one. `fingerprint` and `authorise` work exactly as in `revokeClient`, in the same lock. A
@@ -552,6 +627,9 @@ export async function rotateClient(request) {
 	const { file, name } = request
 	if (!isValidClientName(name)) {
 		throw new TokenStoreError('invalid-name', 'Client name must match [A-Za-z0-9_-]{1,64}')
+	}
+	if (request.access !== undefined && !isAccessMode(request.access)) {
+		throw new TokenStoreError('invalid-access', `Access mode must be one of ${Object.keys(ACCESS_MODES).join(', ')}`)
 	}
 	const now = request.now ?? new Date()
 	const expiresAt = normaliseExpiry(request.expiresAt, now)
@@ -570,12 +648,34 @@ export async function rotateClient(request) {
 				throw new TokenStoreError('invalid-expiry', 'This client has expired; supply a new expiry to rotate it')
 			}
 		}
+		// The capability needs write access. An access change that takes write away takes the capability with it, so that
+		// putting write back later cannot quietly bring CAD upload back.
+		const dropsCadUpload = hasCadUpload(client) && request.access !== undefined && !ACCESS_MODES[request.access].includes('write')
+		// A cad-upload credential that stays one keeps its short life: the expiry it will have after this rotation must meet the rule.
+		if (hasCadUpload(client) && !dropsCadUpload) requireBoundedExpiry(expiresAt ?? (typeof client.expiresAt === 'string' ? client.expiresAt : undefined), now.getTime())
+		const previousPermissions = [...client.permissions]
+		let droppedCapabilities
+		if (request.access !== undefined) {
+			const next = [...ACCESS_MODES[request.access]]
+			if (next.includes('restore') && !previousPermissions.includes('restore') && request.acknowledgeRestore !== true) {
+				throw new TokenStoreError('restore-not-acknowledged', 'Adding restore lets this agent roll a whole whiteboard back. Acknowledge that explicitly to continue')
+			}
+			client.permissions = next
+			if (dropsCadUpload) {
+				droppedCapabilities = [CAD_UPLOAD_CAPABILITY]
+				client.capabilities = client.capabilities.filter((entry) => entry !== CAD_UPLOAD_CAPABILITY)
+				if (client.capabilities.length === 0) delete client.capabilities
+			}
+		}
 		client.tokenHash = tokenHash
 		client.rotatedAt = now.toISOString()
 		if (expiresAt !== undefined) client.expiresAt = expiresAt
 		rotated = {
 			rooms: [...client.rooms],
 			permissions: [...client.permissions],
+			...(hasCadUpload(client) ? { capabilities: client.capabilities.filter((entry) => typeof entry === 'string') } : {}),
+			...(droppedCapabilities === undefined ? {} : { droppedCapabilities }),
+			previousPermissions,
 			...(typeof client.createdAt === 'string' ? { createdAt: client.createdAt } : {}),
 			...(typeof client.expiresAt === 'string' ? { expiresAt: client.expiresAt } : {}),
 		}
@@ -701,6 +801,7 @@ export async function describeClients(file, now = Date.now()) {
 		...(typeof client.createdByUserId === 'string' ? { createdByUserId: client.createdByUserId } : {}),
 		...(typeof client.rotatedAt === 'string' ? { rotatedAt: client.rotatedAt } : {}),
 		...(Array.isArray(client.accountPermissions) ? { accountPermissions: client.accountPermissions.filter((p) => typeof p === 'string') } : {}),
+		...(Array.isArray(client.capabilities) ? { capabilities: client.capabilities.filter((p) => typeof p === 'string') } : {}),
 		...(typeof client.ownerUserId === 'string' ? { ownerUserId: client.ownerUserId } : {}),
 		fingerprint: clientFingerprint(client.tokenHash),
 		status: evaluateExpiry(client.expiresAt, now),

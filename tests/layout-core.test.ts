@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { CAD_REVIEW_SHAPE_TYPE } from '../shared/cad-model'
 import { ALIGNMENT_TOLERANCE, LAYOUT_GAP, estimateText, layoutFingerprint, richTextParagraphs, textFontPx } from '../shared/layout'
 import { computeLayout, descendantsOf, edgePoint, overlapArea, type LayoutBindingRecord, type LayoutShapeRecord } from '../shared/layout-geometry'
 import { LayoutError, alignMoves, distributeMoves, findFreeRegion, gapBetween, gridMoves, placeBelow, placeRightOf, rowMoves, slideClear, stackMoves, verifyLayout, type Move } from '../shared/layout-engine'
@@ -49,6 +50,16 @@ describe('page-space geometry', () => {
 		expect(layout.byId.get(sid('child'))!.bounds).toEqual({ x: 110, y: 220, w: 40, h: 30 })
 		expect(layout.byId.get(sid('child'))!.parentId).toBe(sid('f'))
 		expect(descendantsOf(layout, sid('f'))).toEqual(new Set([sid('child')]))
+	})
+
+	it('reports the real page-space size of a CAD review card inside the printed-parts frame', () => {
+		const frame: LayoutShapeRecord = { id: sid('printed'), type: 'frame', x: 0, y: 1480, rotation: 0, index: 'a1', parentId: PAGE, props: { w: 1600, h: 590 } }
+		const card: LayoutShapeRecord = { id: sid('cad'), type: CAD_REVIEW_SHAPE_TYPE, x: 20, y: 24, rotation: 0, index: 'a2', parentId: frame.id, props: { w: 360, h: 300, modelRecordId: 'cad_model:example' } }
+		const result = layoutOf([frame, card]).byId.get(card.id)!
+		expect(result.bounds).toEqual({ x: 20, y: 1504, w: 360, h: 300 })
+		expect(result.boundsSource).toBe('declared')
+		expect(result.verification).toBe('verified')
+		expect(result.unknownType).toBeUndefined()
 	})
 
 	it('applies a rotated parent: the child\'s page bounds are the box of the rotated rectangle', () => {
@@ -103,6 +114,15 @@ describe('page-space geometry', () => {
 		expect(s.unknownType).toBe(true)
 		expect(s.verification).toBe('unverified')
 		expect(s.boundsSource).toBe('estimated')
+	})
+
+	it('reports a custom shape\'s stored box while keeping its rendering unverified', () => {
+		const custom: LayoutShapeRecord = { id: sid('custom'), type: 'other-custom', x: 12, y: 34, rotation: 0, index: 'a1', parentId: PAGE, props: { w: 210, h: 90 } }
+		const s = layoutOf([custom]).byId.get(custom.id)!
+		expect(s.bounds).toEqual({ x: 12, y: 34, w: 210, h: 90 })
+		expect(s.boundsSource).toBe('declared')
+		expect(s.verification).toBe('unverified')
+		expect(s.unknownType).toBe(true)
 	})
 })
 

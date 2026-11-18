@@ -67,8 +67,14 @@ The operations an agent can reach are:
 |---|---|
 | `GET /api/health` | nothing beyond the service credential |
 | `GET /api/rooms/BOARD_ID/canvas` | `read` |
+| `POST /api/rooms/BOARD_ID/pages` | `write` |
+| `POST /api/boards/BOARD_ID/images` | `write` |
 | `GET /api/rooms/BOARD_ID/semantic-context` | `read` |
 | `GET /api/rooms/BOARD_ID/layout` | `read` |
+| `GET /api/rooms/BOARD_ID/shapes/SHAPE_ID` | `read` |
+| `GET /api/boards/BOARD_ID/shapes/SHAPE_ID/history` | `history` |
+| `POST /api/boards/BOARD_ID/shapes/SHAPE_ID/restore` | `history` and `write` (a `dryRun` preview needs only `history`) |
+| `GET /api/agent-session` | any valid agent token |
 | `POST /api/rooms/BOARD_ID/actions` | `write` |
 | `POST /api/rooms/BOARD_ID/ai/events` | `write` |
 | `GET /api/boards/BOARD_ID/history` | `history` |
@@ -77,8 +83,14 @@ The operations an agent can reach are:
 | `POST /api/boards/BOARD_ID/checkpoints` | `history` and `write` |
 | `POST /api/boards/BOARD_ID/restore` | `restore` |
 | `POST /api/agent-boards` | a board-creating token (see below) |
+| `POST /api/boards/BOARD_ID/cad-machine/artifacts/stl` (also `glb`, `step`, `thumbnail`) | `write` plus the `cad-upload` capability (see below) |
+| `POST /api/boards/BOARD_ID/cad-machine/models` | `write` plus the `cad-upload` capability (see below) |
 
-Everything else is closed to agents: signing in, accounts, invitations, board lists and sharing, uploads and attachments, structured evidence tables, live editing sessions, and the web app itself. An agent works with evidence through the ordinary records only; it cannot create evidence tables.
+Everything else is closed to agents: signing in, accounts, invitations, board lists and sharing, other uploads and attachments, structured evidence tables, live editing sessions, and the web app itself. An agent works with evidence through the ordinary records only; it cannot create evidence tables.
+
+## Uploading CAD files
+
+A token minted by the whiteboard's operator with the `cad-upload` capability, for one board and for at most 365 days (a year), can store validated CAD files (`glb`, `stl`, `step`, `thumbnail`) and add a CAD model entry with its card to that board. Ordinary tokens cannot. Send the file as the request body with `Content-Type: application/octet-stream`; the reply carries the stored file's hash. Reviewing, approving, linking and commenting on CAD models stay with people.
 
 ## Creating a whiteboard
 
@@ -104,6 +116,19 @@ What this does **not** do:
 If something goes wrong after the board is made but before the token can be given it, the new board is removed and the reply is an error, so you are not left with a board the agent cannot use.
 
 ## Writing a record
+
+To create a page on a board you can edit, choose a stable page ID and send it with the name:
+
+```bash
+curl -sS -X POST "$WHITEBOARD_API_BASE/api/rooms/BOARD_ID/pages" \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $WHITEBOARD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"page:lessons-learned","name":"Lessons learned"}'
+```
+
+The reply includes `pageId`, `name`, `clock`, and `created`. Retry with the same ID and name if the response was lost: it returns `created: false` without making another page. The same ID with a different name is a conflict. An agent cannot create pages on boards outside its token's access. Use the returned `pageId` when reading the canvas or layout and when posting shape actions. This operation does not create a new whiteboard.
 
 Send a list of actions. This creates one task:
 
@@ -147,7 +172,7 @@ Every shape says where its size came from and whether it is verified:
 | `declared` | The shape's own width and height, as boxes, frames and images carry. | `verified` (see below) |
 | `estimated` | Worked out from the text, because nothing better exists. Text wraps and fonts differ, so it can be wrong. | `unverified` |
 
-Text and notes are estimated until someone with the board open in a browser has measured them. A box whose label may not fit in it is declared but `unverified`. Treat an estimate as a good guess that leans toward taking more room, never as exact. A measurement is dropped automatically when the text changes (the shape then shows `measurementStale`).
+Text and notes are estimated until someone with the board open in a browser has measured them. A box whose label may not fit in it is declared but `unverified`. CAD review cards report their stored width and height in page coordinates, including when nested in a frame. Other custom shapes with positive stored `w` and `h` report that declared box with `unknownType: true` and `unverified`; the server cannot guarantee how their custom renderer uses it. A shape with no usable size remains `unverified` and needs a browser measurement or explicit shape support. Treat an estimate as a good guess that leans toward taking more room, never as exact. A measurement is dropped automatically when the text changes (the shape then shows `measurementStale`).
 
 ### Layout actions
 
@@ -204,12 +229,122 @@ When a request contains layout actions, the reply gains a `layout` object:
 
 If a person adds a large block of text in their browser, the server has no way to know its drawn size until a browser reports it. Run `find_free_region` or a layout action and read `unverified` rather than assuming. Prefer placing new work in free space (`find_free_region`) over placing it next to content you did not make.
 
+## Editing existing text without losing it
+
+A canvas read is a **preview**, not the content. `GET /canvas` shows each shape's text as one line (the paragraphs are joined with spaces, formatting is left out) and stops at 500 characters. A person can write far more than that in a browser. So every object that has text says plainly what it is showing:
+
+```json
+{
+  "id": "shape:todo",
+  "text": "first 500 characters, flattened...",
+  "textTruncated": true,
+  "originalLength": 3230,
+  "revision": 13,
+  "contentLossy": true,
+  "lossReasons": ["truncated", "paragraph_structure_omitted"]
+}
+```
+
+- `originalLength` is the real length of the full text, and `revision` identifies the exact version you read (the document clock at which that shape last changed).
+- `contentLossy` is **not** the same as "long". A short note with line breaks or bold text is lossy too, because the preview drops that structure. Reasons: `truncated`, `paragraph_structure_omitted`, `formatting_omitted`, `content_not_exactly_representable`.
+- The `text` field keeps its old format so existing clients keep working. Do not treat it as the whole value when `contentLossy` is true.
+
+### Read the whole thing
+
+```bash
+curl -sS "$WHITEBOARD_API_BASE/api/rooms/BOARD_ID/shapes/SHAPE_ID" -H ... -H "Authorization: Bearer $WHITEBOARD_TOKEN"
+```
+
+Needs `read`. It returns that one shape's complete content: `text` (paragraphs separated by newlines), `richText` (the full structure), `originalLength`, `revision`, and a `contentDigest`. The digest is returned **only here**, never by a canvas read: it is your proof that you fetched the full content.
+
+### Replace text
+
+`update_text` accepts up to 20,000 characters (creating text keeps its 500-character limit) and writes plain paragraphs. Send the revision you read:
+
+```json
+{ "tool": "update_text", "id": "shape:todo", "text": "...", "expectedRevision": 13, "expectedContentDigest": "..." }
+```
+
+- If the shape changed since `expectedRevision`, the answer is `409` with `code: "revision_conflict"`. Read it again; never retry blindly.
+- If the current content is lossy, a plain `update_text` is **refused** (`409`, `code: "source_truncated"` or `"source_lossy"`): replacing it from a preview would destroy the rest. Send `expectedRevision` with the `expectedContentDigest` from the full read, or send `expectedRevision` with `"overwriteTruncatedSource": true` to replace the whole value **on purpose**. Either way `expectedRevision` is required, and an acknowledgement never bypasses it (`422`, `code: "expected_revision_required"`).
+- A wrong digest is `409`, `code: "content_digest_mismatch"`.
+- For text that is not lossy, `expectedRevision` is optional (so existing callers keep working) but recommended.
+
+### Look back at one shape, and recover it
+
+```bash
+curl -sS "$WHITEBOARD_API_BASE/api/boards/BOARD_ID/shapes/SHAPE_ID/history" ...     # needs history
+```
+
+Returns that shape's revisions, newest first (`?limit=` up to 100, `?before=EVENT_ID` to continue), each with who changed it, when, which fields changed, and its **complete** content at that point. If the content was damaged, the exact earlier text is here. Recovering needs `history` **and** `write`; it is not the board-wide `restore` scope, and it never rolls back anything else:
+
+```json
+{ "revision": 10, "expectedCurrentRevision": 27, "mode": "content" }
+```
+
+- `mode: "content"` (the default) restores the text and leaves the shape's position, rotation, layer, parent, other properties and arrows exactly as they are now. `mode: "content-and-placement"` also restores position, rotation and the shape's other properties.
+- It is an ordinary edit of the **same shape** (same id, no duplicate), recorded in History as a later change marked as a recovery. The damaging edit stays visible.
+- `expectedCurrentRevision` is required: if the shape changed since you read it, the answer is `409` and nothing is written.
+- Add `"dryRun": true` to see exactly what would change (lengths, the fields touched, and what happened elsewhere on the board since, which will be left alone) without writing anything. A preview needs only `history`.
+- If two events share a revision number, name the one you want with `"eventId"`.
+
+### Know what you can do before you start
+
+`GET /api/agent-session` (or `?boardId=BOARD_ID`) tells the agent its own effective permissions, whether it can recover shapes (`history` + `write`) or restore a whole board, when it expires, and which boards it reaches. It never returns the token or anything derived from it. An agent that can edit but cannot read History should know that **before** it edits anything it could not recover.
+
+## Adding pictures and links
+
+An agent with `write` access can put an image on a board and give shapes a clickable link.
+
+**Upload, then place.** Send the file as the request body. The server inspects its real bytes (the file name and content type are ignored), accepts only PNG, JPEG, GIF and WebP, refuses SVG because it can carry script, and stores it under its own SHA-256. Limits: 4 MB, 8192 pixels on a side, 36 million pixels in all, and 100 images per board. The same bytes uploaded twice are one file.
+
+```bash
+curl -sS -X POST "$WHITEBOARD_API_BASE/api/boards/BOARD_ID/images" \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $WHITEBOARD_TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @picture.png
+```
+
+The `201` reply is `{"image":{"assetId":"img-<sha256>.png","mimeType":"image/png","width":400,"height":200,"bytes":1234}}`. Place it with an action:
+
+```json
+{"actions":[{"tool":"create_image","id":"shape:share-button","assetId":"img-<sha256>.png","x":100,"y":100,"width":400,"altText":"The Share button in the top bar","url":"https://example.com/help"}]}
+```
+
+`width` is optional (the picture's own width, up to 800) and the height always follows the picture's proportions. `altText` and `url` are optional. The image must have been uploaded to this same board; another board's file, a file you never uploaded and a file whose stored contents no longer match its name are all refused, and a request that fails changes nothing. The image shows in History as an AI change.
+
+**Links.** `set_link` sets or, with `"url": null`, clears the link on a rectangle, ellipse, note or image: `{"tool":"set_link","id":"shape:box","url":"https://example.com"}`. A text box cannot hold a link. A link must be a plain `https://` address of at most 2000 characters, with no spaces, no control characters and no user name or password; `http`, `javascript:`, `data:`, `file:` and `mailto:` are refused.
+
+Images are served only to members of the board, as exactly the image type they were checked to be, with `nosniff` and a locked-down Content-Security-Policy.
+
+## Before you say you are finished
+
+Use this API for every change; do not drive the whiteboard's own web interface to edit a board. Drawing is not finished until it has been checked. An agent runs every check below and reports plainly what it checked and what it could not. The public agent guide the server serves at `/agent-guide.md` carries the same list.
+
+**Before writing:** read the canvas and layout first and work on the right `pageId`; choose unique shape IDs; send at most 30 actions per request and keep one text or label to 500 characters; give text a `width`; change only what you created or were asked to change.
+
+**Size every box for its text.** An estimated size is a guess: make boxes taller than you think you need, then measure. A layout `status` of `partially_unverified` is not a pass.
+
+**Before finishing, confirm all of these:**
+
+1. Read the page back over the API: every object you meant to add exists, with the right text.
+2. Open the page in a browser, fit it to the view, and check each box's text sits inside it with room to spare, on a narrow phone-sized view too. Nothing is clipped, nothing overlaps, every arrow is attached.
+3. Other pages are unchanged: compare their object counts with what you saw before you started.
+4. Test or temporary content you made is removed.
+5. No token, secret or password appears on the board, in a reply or in a log.
+6. Your change shows in History as an AI change.
+7. Your final message says what you checked and names anything you could not verify.
+
+If a check fails, fix it and run the checks again. Do not report the work as done until they all pass. These are instructions the agent follows: the server cannot see a browser, so it does not enforce them itself.
+
 ## Boards stay separate
 
 A token is tied to specific boards when it is issued.
 
 - A token for Board A cannot read or change Board B. The reply is the same as for a board that does not exist, so an agent cannot discover which other boards are there.
-- A board-creating token starts with no boards, and gets exactly the boards it creates itself. Permission to create boards is never permission to use the owner's other boards.
+- Creating a board-creating agent also creates its same-named first board. The token gets that board and any additional boards it creates itself. Permission to create boards is never permission to use the owner's older boards.
 - A token never grants more than its scopes. A read-only token cannot write, a token without `history` cannot read History, and a token without `restore` cannot restore.
 - Records on one board cannot refer to evidence or attachments from another board.
 

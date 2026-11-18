@@ -21,6 +21,7 @@
 .aw-badge-history { background: #ede9fe; color: #6d28d9; }
 .aw-badge-restore { background: #fef3c7; color: #92400e; }
 .aw-badge-create { background: #dcfce7; color: #166534; }
+.aw-badge-cad { background: #cffafe; color: #155e75; }
 .aw-agents-note { margin: 4px 0 8px; font-size: 13px; }
 .aw-status { font-size: 12px; font-weight: 700; margin-left: auto; }
 .aw-status-neutral { color: #64748b; }
@@ -79,3 +80,9 @@
 	.aw-agent-actions, .aw-agent-confirm-actions { justify-content: stretch; }
 	.aw-agent-actions button, .aw-agent-confirm-actions button { flex: 1; }
 }
+.aw-scope-change { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #c7d2fe; border-radius: 9px; background: #fff; font-size: 13px; }
+.aw-scope-added { color: #166534; background: #dcfce7; border-radius: 5px; padding: 0 5px; }
+.aw-scope-removed { color: #92400e; }
+.aw-restore-warning { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid #fecaca; border-radius: 9px; background: #fff7f7; color: #7f1d1d; font-size: 13px; }
+.aw-restore-warning .aw-check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.aw-token-setup { white-space: pre-wrap; margin: 0; user-select: text; }

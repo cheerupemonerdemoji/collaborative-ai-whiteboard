@@ -2,11 +2,11 @@
  * Public acceptance harness.
  *
  * Every request here leaves this machine, crosses the public Internet to
- * Cloudflare, passes the Access gate, and comes back down the tunnel to the
- * application. Nothing in this file talks to 127.0.0.1. That distinction is the
- * whole point: the unit suite already proves the application's logic, and it
- * proves nothing about Cloudflare, the tunnel, cookie flags over real HTTPS, or
- * WebSocket upgrades through an edge proxy.
+ * Cloudflare, and comes back down the tunnel to the application. Nothing in this
+ * file talks to 127.0.0.1. That distinction is the whole point: the unit suite
+ * already proves the application's logic, and it proves nothing about
+ * Cloudflare, the tunnel, cookie flags over real HTTPS, or WebSocket upgrades
+ * through an edge proxy.
  *
  * Two authentication layers are in play and each check records which one it is
  * exercising:
@@ -18,14 +18,24 @@
  *   app-origin      the application's origin enforcement
  *   app-validation  schema and input validation
  *
- * Credentials. The Access cookie arrives in CANVAS_ACCESS_COOKIE and is never
- * printed, stored or written to any output. Application passwords are generated
- * per run and die with the process. Invitation tokens are single-use and are
- * redacted in the evidence file. Nothing this script handles is ever committed.
+ * Set ACCEPTANCE_EDGE_MODE=access for the original Access-gated architecture or
+ * ACCEPTANCE_EDGE_MODE=app for a public Tunnel whose human boundary is the
+ * application's own login. Credentials, when used, are never printed, stored or
+ * written to any output. Application passwords are generated per run and die
+ * with the process. Invitation tokens are single-use and are redacted in the
+ * evidence file. Nothing this script handles is ever committed.
  *
  * Usage:
- *   CANVAS_ACCESS_COOKIE=... ACCEPTANCE_INVITES=tok1,tok2,tok3,tok4 \
+ *   ACCEPTANCE_EDGE_MODE=app ACCEPTANCE_INVITES=tok1,tok2,tok3,tok4 \
  *     node scripts/public-acceptance.mjs [--board acceptance-YYYY-MM-DD]
+ *
+ * This script only ever talks to a real ACCEPTANCE_BASE and never creates
+ * accounts on its own initiative against production - four real invitation
+ * tokens are always required for the account-dependent phases, supplied by
+ * an operator. For fast, repeatable, in-process authorization testing that
+ * needs no real host and no real credentials at all, see
+ * tests/helpers/acceptance-fixture.ts and the acceptance-fixture design note
+ * instead; the two are deliberately not merged (see that doc for why).
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -39,14 +49,20 @@ const BASE = process.env.ACCEPTANCE_BASE ?? 'https://whiteboard.example.com'
 const ORIGIN = BASE
 const WS_BASE = BASE.replace(/^http/, 'ws')
 const ACCESS_COOKIE = process.env.CANVAS_ACCESS_COOKIE ?? ''
+const EDGE_MODE = process.env.ACCEPTANCE_EDGE_MODE ?? 'access'
 const INVITES = (process.env.ACCEPTANCE_INVITES ?? '').split(',').map((t) => t.trim()).filter(Boolean)
 const SYNC_SCHEMA = createTLSchema().serialize()
 
 const boardArg = process.argv.indexOf('--board')
 const BOARD = boardArg >= 0 ? process.argv[boardArg + 1] : `acceptance-${new Date().toISOString().slice(0, 10)}`
 
-if (!ACCESS_COOKIE) {
-	console.error('CANVAS_ACCESS_COOKIE is required: every public request must pass Cloudflare Access.')
+if (!['access', 'app'].includes(EDGE_MODE)) {
+	console.error('ACCEPTANCE_EDGE_MODE must be either access or app.')
+	process.exit(2)
+}
+
+if (EDGE_MODE === 'access' && !ACCESS_COOKIE) {
+	console.error('CANVAS_ACCESS_COOKIE is required in access mode.')
 	process.exit(2)
 }
 
@@ -232,22 +248,37 @@ const users = {}
 /* =================================================================== phases = */
 
 async function phaseEdge() {
-	// No Access cookie at all: this is what an anonymous visitor from the
-	// Internet gets, and it must never be the application.
 	const anon = new Client('anonymous', { withAccess: false })
 
-	for (const [id, path] of [['A1', '/'], ['A2', '/api/health'], ['A3', '/api/boards'], ['A4', '/api/auth/me']]) {
-		await check(id, 'edge', 'edge', `anonymous GET ${path} is stopped by Cloudflare Access`, async () => {
-			const response = await anon.get(path)
-			const host = response.location ? new URL(response.location).hostname : ''
-			expect(
-				response.status === 302 && hostIsOrIsUnder(host, 'cloudflareaccess.com'),
-				`status=${response.status} redirect-host=${host || '(none)'}`
-			)
+	if (EDGE_MODE === 'access') {
+		for (const [id, path] of [['A1', '/'], ['A2', '/api/health'], ['A3', '/api/boards'], ['A4', '/api/auth/me']]) {
+			await check(id, 'edge', 'edge', `anonymous GET ${path} is stopped by Cloudflare Access`, async () => {
+				const response = await anon.get(path)
+				const host = response.location ? new URL(response.location).hostname : ''
+				expect(
+					response.status === 302 && hostIsOrIsUnder(host, 'cloudflareaccess.com'),
+					`status=${response.status} redirect-host=${host || '(none)'}`
+				)
+			})
+		}
+	} else {
+		await check('A1', 'edge', 'edge', 'anonymous visitor receives the application shell', async () => {
+			const response = await anon.get('/')
+			expect(response.status === 200 && /<html/i.test(response.text), `status=${response.status}`)
 		})
+		await check('A2', 'edge', 'edge', 'anonymous health check reaches the application through the Tunnel', async () => {
+			const response = await anon.get('/api/health')
+			expect(response.status === 200 && response.json?.ok === true, `status=${response.status}`)
+		})
+		for (const [id, path] of [['A3', '/api/boards'], ['A4', '/api/auth/me']]) {
+			await check(id, 'edge', 'app-auth', `anonymous GET ${path} is denied by the application`, async () => {
+				const response = await anon.get(path)
+				expect(response.status === 401, `status=${response.status}`)
+			})
+		}
 	}
 
-	await check('A5', 'edge', 'edge', 'anonymous WebSocket upgrade is stopped by Cloudflare Access', async () => {
+	await check('A5', 'edge', EDGE_MODE === 'access' ? 'edge' : 'ws-authz', `anonymous WebSocket is denied by ${EDGE_MODE === 'access' ? 'Cloudflare Access' : 'the application'}`, async () => {
 		const handle = openSocket(anon, BOARD)
 		const { outcome, status, code } = await handle.settled
 		closeSocket(handle)
@@ -256,11 +287,12 @@ async function phaseEdge() {
 }
 
 async function phaseAccessIsNotAppAuth() {
-	// Past the edge, with no application session. Reaching the origin must not
-	// be mistaken for being logged in.
+	// Reaching the origin must never be mistaken for being logged in. In Access
+	// mode this client carries only the outer cookie; in app mode it is simply a
+	// second fresh anonymous client.
 	const gateOnly = new Client('access-only')
 
-	await check('B1', 'access-vs-app', 'edge', 'an approved Access session reaches the application origin', async () => {
+	await check('B1', 'access-vs-app', 'edge', `${EDGE_MODE === 'access' ? 'an approved Access session' : 'a fresh anonymous client'} reaches the application origin`, async () => {
 		const response = await gateOnly.get('/api/health')
 		expect(
 			response.status === 200 && response.json?.ok === true,
@@ -274,13 +306,13 @@ async function phaseAccessIsNotAppAuth() {
 		['B4', `/api/rooms/${BOARD}/canvas`],
 		['B5', `/api/boards/${BOARD}/history`],
 	]) {
-		await check(id, 'access-vs-app', 'app-auth', `Access alone does not authorize ${path}`, async () => {
+		await check(id, 'access-vs-app', 'app-auth', `${EDGE_MODE === 'access' ? 'Access alone' : 'origin reachability'} does not authorize ${path}`, async () => {
 			const response = await gateOnly.get(path)
 			expect(response.status === 401, `status=${response.status}`)
 		})
 	}
 
-	await check('B6', 'access-vs-app', 'ws-authz', 'Access alone does not authorize a board WebSocket', async () => {
+	await check('B6', 'access-vs-app', 'ws-authz', `${EDGE_MODE === 'access' ? 'Access alone' : 'origin reachability'} does not authorize a board WebSocket`, async () => {
 		const handle = openSocket(gateOnly, BOARD)
 		const { outcome, status, code } = await handle.settled
 		closeSocket(handle)
@@ -873,7 +905,7 @@ async function main() {
 		runAt: new Date().toISOString(),
 		base: BASE,
 		board: BOARD,
-		note: 'Every request in this run crossed the public Internet and Cloudflare Access. No credential values are recorded.',
+		note: `Every request in this run crossed the public Internet and Cloudflare Tunnel in ${EDGE_MODE} edge mode. No credential values are recorded.`,
 		identities: Object.values(users).map((user) => ({ role: user.key, displayName: user.displayName, loginShape: '<label>-<random>@acceptance.invalid' })),
 		tally,
 		checks: results.map((row) => ({ ...row, detail: redact(row.detail) })),
