@@ -556,6 +556,34 @@ export class BoardHistoryStore {
 		return row ? eventFromRow(row) : null
 	}
 
+	/**
+	 * The events whose stored changes include `recordId`, newest first, and the id to continue from. Every change stores the COMPLETE before and
+	 * after record, so this is exact recoverable history of one object without reconstructing the board. The SQL only narrows by a text match
+	 * on the exact JSON of the id; every candidate is then verified against its parsed changes.
+	 */
+	listEventsTouchingRecord(recordId: string, options: { beforeId?: number; limit?: number } = {}): { events: HistoryEvent[]; nextCursor: number | null } {
+		assertIdentifier(recordId, 'recordId')
+		const limit = Math.max(1, Math.min(options.limit ?? 20, 100))
+		const pattern = `%"recordId":${JSON.stringify(recordId).replace(/[\\%_]/g, '\\$&')}%`
+		const found: HistoryEvent[] = []
+		let cursor = options.beforeId
+		let exhausted = false
+		for (let round = 0; round < 50 && found.length <= limit && !exhausted; round += 1) {
+			const rows = this.database
+				.prepare(`SELECT * FROM history_events WHERE board_id = ? AND changes_json LIKE ? ESCAPE '\\' ${cursor === undefined ? '' : 'AND id < ?'} ORDER BY id DESC LIMIT 200`)
+				.all(...(cursor === undefined ? [this.boardId, pattern] : [this.boardId, pattern, cursor])) as EventRow[]
+			if (rows.length < 200) exhausted = true
+			for (const row of rows) {
+				cursor = row.id
+				const event = eventFromRow(row)
+				if (event.changes.some((change) => change.recordId === recordId)) found.push(event)
+				if (found.length > limit) break
+			}
+		}
+		const page = found.slice(0, limit)
+		return { events: page, nextCursor: found.length > limit ? page.at(-1)?.id ?? null : null }
+	}
+
 	listEvents(filters: HistoryEventFilters = {}): HistoryEventPage {
 		const clauses = ['board_id = ?']
 		const bindings: Array<string | number> = [this.boardId]

@@ -72,7 +72,7 @@ describe('the read-write-history level', () => {
 
 describe('the access type', () => {
 	it('uses the exact notice the owner must see', () => {
-		expect(CREATOR_NOTICE).toBe('This lets the agent create new boards owned by your account. It does not give the agent access to your existing boards.')
+		expect(CREATOR_NOTICE).toBe('This creates a first whiteboard with the same name and lets the agent create more boards owned by your account. It does not give the agent access to your existing boards.')
 	})
 
 	it('defaults a board-creating agent to read, edit and history, and an existing-board agent to read only', () => {
@@ -183,10 +183,10 @@ describe('the list, the token dialog and the checklist', () => {
 		expect(out).not.toMatch(/<input[^>]*value="T{43}"/)
 	})
 
-	it('gives a creator a checklist with no whiteboard id, because it has none yet', () => {
+	it('explains that the first whiteboard is automatic without exposing an id in setup instructions', () => {
 		const out = inRouter(createElement(SetupChecklist, { creator: true }))
 		expect(out).not.toContain('WHITEBOARD_BOARD_ID')
-		expect(out).toContain('There is no whiteboard ID yet')
+		expect(out).toContain('first whiteboard is created automatically')
 		expect(out).toContain('board-creation request')
 		expect(out).toContain('href="/help/agent-api"')
 		expect(out).not.toContain('Copy ID')
@@ -253,11 +253,13 @@ describe('the client and the server agree about board-creating agents (contract)
 		rmSync(directory, { recursive: true, force: true })
 	})
 
-	it('runs the whole journey: create with no board, list, let the agent make a board, rotate, revoke', async () => {
+	it('runs the whole journey: create with an automatic board, make another, rotate, revoke', async () => {
 		actAs(f.owner)
 
 		const created = await createBoardCreator({ displayName: 'Planner', access: 'read-write-history', expiresAt: new Date(Date.now() + 30 * DAY).toISOString() })
-		expect(created.agent).toMatchObject({ displayName: 'Planner', canCreateBoards: true, rooms: [], permissions: ['read', 'write', 'history'], status: 'active' })
+		expect(created.board.name).toBe('Planner')
+		expect(created.agent).toMatchObject({ displayName: 'Planner', canCreateBoards: true, rooms: [created.board.id], permissions: ['read', 'write', 'history'], status: 'active' })
+		expect(authorizeApiToken(`Bearer ${created.token}`, created.board.id, 'write')).toBe(created.agent.name)
 		expect(authorizeApiToken(`Bearer ${created.token}`, f.boardId, 'read')).toBeNull() // no access to the owner's existing board
 
 		const listed = await listBoardCreators()
@@ -267,10 +269,10 @@ describe('the client and the server agree about board-creating agents (contract)
 		expect(made.statusCode, made.body).toBe(201)
 		const boardId = made.json().boardId as string
 		expect(authorizeApiToken(`Bearer ${created.token}`, boardId, 'write')).toBe(created.agent.name)
-		expect((await listBoardCreators())[0].rooms).toEqual([boardId])
+		expect((await listBoardCreators())[0].rooms).toEqual([created.board.id, boardId])
 
 		const rotated = await rotateAgent(listed[0].ref)
-		expect(rotated.agent).toMatchObject({ canCreateBoards: true, rooms: [boardId] })
+		expect(rotated.agent).toMatchObject({ canCreateBoards: true, rooms: [created.board.id, boardId] })
 		expect(authorizeApiToken(`Bearer ${created.token}`, boardId, 'read')).toBeNull()
 		expect(authorizeApiToken(`Bearer ${rotated.token}`, boardId, 'read')).toBe(created.agent.name)
 

@@ -19,7 +19,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/app/.local/share/collaborative-ai-canvas
+# Every directory the service writes must be listed here: ProtectHome=read-only makes the rest of /home read-only (EROFS).
+# The first is the data directory (boards, auth database, uploads). The second is the token store directory: managing agent
+# tokens creates api-tokens.json.lock and backups beside api-tokens.json. Without it, creating or rotating an agent fails with a 500.
+ReadWritePaths=/home/app/.local/share/collaborative-ai-canvas /home/app/.config/collaborative-ai-canvas
 
 [Install]
 WantedBy=default.target

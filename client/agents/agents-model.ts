@@ -29,6 +29,8 @@ export interface Agent {
 	createdByYou: boolean
 	/** Present (true) only for an agent that can create new whiteboards owned by its owner. */
 	canCreateBoards?: boolean
+	/** Present (true) only for an agent that can upload CAD files and add CAD models to its whiteboard. */
+	canUploadCad?: boolean
 }
 
 export interface OwnedBoard {
@@ -68,7 +70,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
 export const CREATOR_DEFAULT_ACCESS: AccessLevel = 'read-write-history'
 
 /** Shown wherever the owner chooses or reviews the "create new whiteboards" type. Exact wording is deliberate. */
-export const CREATOR_NOTICE = 'This lets the agent create new boards owned by your account. It does not give the agent access to your existing boards.'
+export const CREATOR_NOTICE = 'This creates a first whiteboard with the same name and lets the agent create more boards owned by your account. It does not give the agent access to your existing boards.'
 
 export const CREATOR_ACCESS_NOTE = 'These permissions apply to every board the agent creates, and only to those boards.'
 
@@ -180,6 +182,47 @@ export function validateCreate(form: CreateForm, now: number = Date.now()): Vali
 	return { ok: true, input: { displayName, access: form.access, ...(expiry.expiresAt === undefined ? {} : { expiresAt: expiry.expiresAt }), ...(form.creator ? { creator: true as const } : {}) } }
 }
 
+/* ------------------------------------------------------------- changing access -- */
+
+/** The access level whose permissions are exactly `permissions`, or null when the agent holds a combination the page does not offer. */
+export function accessLevelFor(permissions: readonly Permission[]): AccessLevelOption | null {
+	const held = new Set(permissions)
+	return ACCESS_LEVELS.find((level) => level.permissions.length === held.size && level.permissions.every((permission) => held.has(permission))) ?? null
+}
+
+export interface AccessChangePreview {
+	previous: Permission[]
+	next: Permission[]
+	added: Permission[]
+	removed: Permission[]
+	changed: boolean
+	/** Adding board-wide restore: the one change that always needs an explicit acknowledgement. */
+	addsRestore: boolean
+}
+
+/**
+ * What choosing `level` would do to an agent that holds `current`. `'keep'` is the ordinary rotation and changes nothing. Nothing is ever
+ * added silently: the page shows `added` and `removed` before anything is sent, and adding history never adds restore.
+ */
+export function previewAccessChange(current: readonly Permission[], level: AccessLevel | 'keep'): AccessChangePreview {
+	const previous = [...current]
+	const next = level === 'keep' ? previous : [...(ACCESS_LEVELS.find((option) => option.value === level)?.permissions ?? previous)]
+	const added = next.filter((permission) => !previous.includes(permission))
+	const removed = previous.filter((permission) => !next.includes(permission))
+	return { previous, next, added, removed, changed: added.length > 0 || removed.length > 0, addsRestore: added.includes('restore') }
+}
+
+export type RotateAccessValidation = { ok: true; change?: { access: AccessLevel; acknowledgeRestore?: true } } | { ok: false; message: string }
+
+/** The single place that decides whether a rotation with a change of access may be sent, and with what. */
+export function validateRotateAccess(current: readonly Permission[], level: AccessLevel | 'keep', restoreAcknowledged: boolean): RotateAccessValidation {
+	if (level === 'keep') return { ok: true }
+	const preview = previewAccessChange(current, level)
+	if (!preview.changed) return { ok: true }
+	if (preview.addsRestore && !restoreAcknowledged) return { ok: false, message: 'Confirm that you understand what restore access allows.' }
+	return { ok: true, change: { access: level, ...(preview.addsRestore ? { acknowledgeRestore: true as const } : {}) } }
+}
+
 /* ------------------------------------------------------------------------ rotate -- */
 
 /** An expired agent, or one whose expiry cannot be read, cannot be rotated without choosing a new expiry. */
@@ -193,6 +236,47 @@ export type RotateExpiryChoice = 'keep' | Exclude<ExpiryChoice, 'never'>
 export function rotateExpiry(choice: RotateExpiryChoice, customDate: string, now: number = Date.now()): ExpiryResult {
 	if (choice === 'keep') return { ok: true }
 	return expiresAtFor(choice, customDate, now)
+}
+
+/* ------------------------------------------------------------ CAD-upload agents -- */
+
+/** The longest an agent that can upload CAD files may live. The server enforces it; a test compares this to the server's constant. */
+export const CAD_UPLOAD_MAX_DAYS = 365
+
+type RotateChoice = { value: Exclude<ExpiryChoice, 'never'>; label: string }
+
+/** The length of each preset in days. 'custom' has no fixed length: the date the owner picks is checked against the maximum instead. */
+const PRESET_DAYS: Readonly<Record<Exclude<ExpiryChoice, 'never' | 'custom'>, number>> = { '7d': 7, '30d': 30, '90d': 90, '365d': 365 }
+
+/** The expiry choices a rotation may offer this agent: never "no expiry", and for a CAD-upload agent only the presets within its maximum. */
+export function rotateChoicesFor(agent: Pick<Agent, 'canUploadCad'>): readonly RotateChoice[] {
+	const all = EXPIRY_CHOICES.filter((option): option is RotateChoice => option.value !== 'never')
+	return agent.canUploadCad ? all.filter((option) => option.value === 'custom' || PRESET_DAYS[option.value] <= CAD_UPLOAD_MAX_DAYS) : all
+}
+
+/** What the expiry select starts on: keep the current one, unless a new one is required (90 days, for every agent; a test checks that choice is always offered). */
+export function defaultRotateChoice(agent: Pick<Agent, 'status' | 'canUploadCad'>): RotateExpiryChoice {
+	if (!rotationNeedsExpiry(agent)) return 'keep'
+	return '90d'
+}
+
+/** The last calendar day (YYYY-MM-DD, owner's time zone) whose end still falls within the CAD-upload maximum from `now`. */
+export function latestCadUploadDate(now: number = Date.now()): string {
+	const limit = new Date(now + CAD_UPLOAD_MAX_DAYS * DAY_MS)
+	let day = new Date(limit.getFullYear(), limit.getMonth(), limit.getDate(), 23, 59, 59, 0)
+	if (day.getTime() > limit.getTime()) day = new Date(limit.getFullYear(), limit.getMonth(), limit.getDate() - 1, 23, 59, 59, 0)
+	const two = (value: number) => String(value).padStart(2, '0')
+	return `${day.getFullYear()}-${two(day.getMonth() + 1)}-${two(day.getDate())}`
+}
+
+/** `rotateExpiry`, plus the CAD-upload maximum: a date further out than the server allows is refused here with a plain reason. */
+export function rotateExpiryFor(agent: Pick<Agent, 'canUploadCad'>, choice: RotateExpiryChoice, customDate: string, now: number = Date.now()): ExpiryResult {
+	const result = rotateExpiry(choice, customDate, now)
+	if (!result.ok || !agent.canUploadCad || result.expiresAt === undefined) return result
+	if (Date.parse(result.expiresAt) - now > CAD_UPLOAD_MAX_DAYS * DAY_MS) {
+		return { ok: false, message: `This agent can upload CAD files, so its expiry can be at most ${CAD_UPLOAD_MAX_DAYS} days away.` }
+	}
+	return result
 }
 
 /* ------------------------------------------------------------------ presentation -- */
@@ -259,7 +343,17 @@ export interface RevealedToken {
 	agentTitle: string
 	/** The whiteboard the token is for; null for an agent that creates its own whiteboards. */
 	boardName: string | null
+	/** The whiteboard's id (not a secret) for the setup block; null for an agent that creates its own whiteboards. */
+	boardId?: string | null
 	token: string
+}
+
+
+/** Where an agent connects, from the server: the API address, whether Cloudflare sits in front, and where to read how. */
+export interface AgentConnection {
+	apiOrigin: string
+	viaCloudflare: boolean
+	guideUrl: string
 }
 
 export type TokenState = RevealedToken | null

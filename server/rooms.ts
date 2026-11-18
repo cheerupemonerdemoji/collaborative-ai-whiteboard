@@ -5,6 +5,7 @@ import {
 	NodeSqliteWrapper,
 	SQLiteSyncStorage,
 	TLSocketRoom,
+	type TLRecordAuthorizers,
 	type WebSocketMinimal,
 } from '@tldraw/sync-core'
 import type { TLRecord } from '@tldraw/tlschema'
@@ -12,6 +13,7 @@ import Database from 'better-sqlite3'
 import type { AccountEventRecord, BoardRole } from './auth-db'
 import { BoardHistoryRecorder, BoardHistoryStore } from './history'
 import { HistorySyncStorage, type HistoryWriteContext } from './history-storage'
+import { CAD_MODEL_TYPE } from '../shared/cad-model'
 import type { HistorySource } from '../shared/history'
 import { syncSchema } from '../shared/schema'
 
@@ -44,6 +46,17 @@ export interface RoomHandle {
 	expiryTimers: Map<string, ReturnType<typeof setTimeout>>
 	closed: boolean
 }
+
+/**
+ * Server-side write rules for records a browser may read through sync but must never write there.
+ *
+ * A `cad_model` carries review state, approvals and attribution. A veto skips the write and the client
+ * self-corrects to the server's copy, so a forged approval, an edited approved revision or a deleted model never
+ * reaches storage or history. The only writers are the HTTP routes in server/cad-routes.ts, which run on the
+ * server's own transactions (never subject to these rules) and stamp the actor from the signed-in session. Rules
+ * here must stay synchronous and do no I/O; this one is a flat refusal.
+ */
+export const recordAuthorizers = { [CAD_MODEL_TYPE]: () => null } as unknown as TLRecordAuthorizers<TLRecord, RoomSessionMeta>
 
 const rooms = new Map<string, RoomHandle>()
 const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -146,6 +159,7 @@ export function getRoomHandle(inputRoomId: string): RoomHandle {
 	const room = new TLSocketRoom<TLRecord, RoomSessionMeta>({
 		schema,
 		storage,
+		authorizeRecord: recordAuthorizers,
 		onAfterReceiveMessage({ stringified, meta, sessionId }) {
 			if (meta.expiresAt !== undefined && Date.now() >= meta.expiresAt) throw new Error('Session expired')
 			let type: unknown

@@ -3,8 +3,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ApiError, useAuth } from '../auth'
 import { HelpLink } from '../help/HelpPage'
 import './agents.css'
-import { createAgent, createBoardCreator, listAgents, listBoardCreators, listOwnedBoards, revokeAgent, rotateAgent } from './agents-api'
-import { agentTitle, friendlyError, onPageHide, tokenReducer, type AccessLevel, type Agent, type OwnedBoard } from './agents-model'
+import { createAgent, createBoardCreator, getAgentApiOrigin, listAgents, listAllBoardsAsSiteOwner, listBoardCreators, listOwnedBoards, revokeAgent, rotateAgent, type RotateChange } from './agents-api'
+import { PERMISSION_LABELS, agentTitle, friendlyError, onPageHide, tokenReducer, type AccessLevel, type Agent, type AgentConnection, type OwnedBoard } from './agents-model'
 import { AgentList, type Pending } from './AgentList'
 import { CreateAgentForm } from './CreateAgentForm'
 import { SetupChecklist } from './SetupChecklist'
@@ -34,6 +34,7 @@ export function AgentsPage() {
 	const [agentsError, setAgentsError] = useState<string | null>(null)
 	const [creators, setCreators] = useState<Agent[] | null>(null)
 	const [creatorsError, setCreatorsError] = useState<string | null>(null)
+	const [connection, setConnection] = useState<AgentConnection | null>(null)
 	const [reloadTick, setReloadTick] = useState(0)
 	const [pending, setPending] = useState<Pending | null>(null)
 	const [busy, setBusy] = useState(false)
@@ -47,7 +48,8 @@ export function AgentsPage() {
 
 	useEffect(() => {
 		let cancelled = false
-		listOwnedBoards().then((list) => {
+		// The site owner manages agents on every board; everyone else only on boards they own.
+		void (user?.isAdmin ? listAllBoardsAsSiteOwner() : listOwnedBoards()).then((list) => {
 			if (cancelled) return
 			setBoards(list)
 			const wanted = params.get('board')
@@ -89,6 +91,13 @@ export function AgentsPage() {
 		return () => { cancelled = true }
 	}, [reloadTick])
 
+	// Where an agent connects. Only a convenience for the setup block, so a failure just hides the block.
+	useEffect(() => {
+		let cancelled = false
+		getAgentApiOrigin().then((found) => { if (!cancelled) setConnection(found) }).catch(() => undefined)
+		return () => { cancelled = true }
+	}, [])
+
 	// A frozen back/forward-cache page must not keep a live token behind it.
 	useEffect(() => onPageHide(window, () => dispatchToken({ type: 'pagehide' })), [])
 
@@ -114,10 +123,12 @@ export function AgentsPage() {
 		if (input.creator) {
 			const { creator: _creator, ...rest } = input
 			void run('create the agent', async () => {
-				const { token } = await createBoardCreator(rest)
-				dispatchToken({ type: 'reveal', revealed: { kind: 'created', agentTitle: input.displayName, boardName: null, token } })
+				const { token, board: createdBoard } = await createBoardCreator(rest)
+				dispatchToken({ type: 'reveal', revealed: { kind: 'created', agentTitle: input.displayName, boardName: null, boardId: createdBoard.id, token } })
+				setBoards((current) => current ? [createdBoard, ...current.filter((candidate) => candidate.id !== createdBoard.id)] : current)
+				setBoardId(createdBoard.id)
 				setFormKey((key) => key + 1)
-				setNotice(`Created “${input.displayName}”. It can now create whiteboards owned by your account.`)
+				setNotice(`Created “${input.displayName}” and its first whiteboard.`)
 				reload()
 			})
 			return
@@ -125,23 +136,25 @@ export function AgentsPage() {
 		if (!board) return
 		void run('create the agent', async () => {
 			const { token } = await createAgent({ boardId: board.id, displayName: input.displayName, access: input.access, ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }) })
-			dispatchToken({ type: 'reveal', revealed: { kind: 'created', agentTitle: input.displayName, boardName: board.name, token } })
+			dispatchToken({ type: 'reveal', revealed: { kind: 'created', agentTitle: input.displayName, boardName: board.name, boardId: board.id, token } })
 			setFormKey((key) => key + 1)
 			setNotice(`Created access for “${input.displayName}”.`)
 			reload()
 		})
 	}
 
-	function rotate(ref: string, expiresAt?: string) {
+	function rotate(ref: string, expiresAt?: string, change?: RotateChange) {
 		const isCreator = creators?.some((candidate) => candidate.ref === ref) === true
 		if (!isCreator && !board) return
 		const known = (isCreator ? creators : agents)?.find((candidate) => candidate.ref === ref)
 		const title = agentTitle(known ?? { name: 'the agent' })
 		void run('rotate the token', async () => {
-			const { token } = await rotateAgent(ref, expiresAt)
-			dispatchToken({ type: 'reveal', revealed: { kind: 'rotated', agentTitle: title, boardName: isCreator ? null : board!.name, token } })
+			const { token, accessChange } = await rotateAgent(ref, expiresAt, change)
+			dispatchToken({ type: 'reveal', revealed: { kind: 'rotated', agentTitle: title, boardName: isCreator ? null : board!.name, boardId: isCreator ? null : board!.id, token } })
 			setPending(null)
-			setNotice(`Rotated the token for “${title}”.`)
+			const added = accessChange?.added.map((permission) => PERMISSION_LABELS[permission]).join(', ')
+			const removed = accessChange?.removed.map((permission) => PERMISSION_LABELS[permission]).join(', ')
+			setNotice(`Rotated the token for “${title}”.${added ? ` Added access: ${added}.` : ''}${removed ? ` Removed access: ${removed}.` : ''}`)
 			reload()
 		})
 	}
@@ -227,6 +240,6 @@ export function AgentsPage() {
 					{board ? <SetupChecklist boardId={board.id} boardName={board.name} /> : null}
 				</>}
 		</section>
-		{revealed ? <TokenDialog revealed={revealed} onDismiss={() => dispatchToken({ type: 'dismiss' })} /> : null}
+		{revealed ? <TokenDialog revealed={revealed} connection={connection} onDismiss={() => dispatchToken({ type: 'dismiss' })} /> : null}
 	</main>
 }

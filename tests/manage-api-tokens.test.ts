@@ -161,3 +161,75 @@ describe('board-creating credentials (accountClients) and the command-line tool'
 		expect(readStore(file).clients[0].permissions).toEqual(['read', 'write', 'history'])
 	})
 })
+
+describe('the cad-upload capability (ADR 013)', () => {
+	type CapClient = Client & { capabilities?: string[]; expiresAt?: string }
+	const stored = (file: string) => readStore(file).clients as CapClient[]
+
+	it('--cad-upload with --expires stores the capability and the expiry for one board with write access', () => {
+		const { file } = workspace()
+		const output = run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload', '--expires', '7d']).toString()
+		run(file, ['create', 'plain-agent', 'board-a', 'read-write'])
+		const clients = stored(file)
+		const cad = clients.find((client) => client.name === 'cad-agent')
+		expect(cad?.capabilities).toEqual(['cad-upload'])
+		expect(Date.parse(cad?.expiresAt ?? '') - Date.now()).toBeGreaterThan(6.9 * 86_400_000)
+		expect(clients.find((client) => client.name === 'plain-agent')?.capabilities).toBeUndefined()
+		expect(output).toContain('Capability cad-upload granted for this one board.')
+	})
+
+	it('refuses --cad-upload without --expires, and with an expiry beyond the maximum, leaving the store untouched', () => {
+		const { file } = workspace()
+		writeStore(file, [fixture('client-a')])
+		const before = readFileSync(file, 'utf8')
+		expect(() => run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload'])).toThrow(/--expires/)
+		expect(() => run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload', '--expires', '366d'])).toThrow(/365 days/)
+		expect(() => run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload', '--expires', '2999-01-01T00:00:00Z'])).toThrow(/365 days/)
+		expect(readFileSync(file, 'utf8')).toBe(before)
+	})
+
+	it('accepts --expires up to exactly 365d', () => {
+		const { file } = workspace()
+		run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload', '--expires', '365d'])
+		expect(stored(file)[0].capabilities).toEqual(['cad-upload'])
+	})
+
+	it('accepts an absolute --expires with milliseconds, as used to match another token\'s expiry to the instant', () => {
+		const { file } = workspace()
+		const target = new Date(Date.now() + 355 * 86_400_000 + 123).toISOString()
+		expect(target).toMatch(/\.\d{3}Z$/)
+		run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload', '--expires', target])
+		expect(stored(file)[0]).toMatchObject({ capabilities: ['cad-upload'], expiresAt: target })
+	})
+
+	it('still refuses --cad-upload without write access or for more than one board, even with a good expiry', () => {
+		const { file } = workspace()
+		writeStore(file, [fixture('client-a')])
+		const before = readFileSync(file, 'utf8')
+		expect(() => run(file, ['create', 'cad-agent', 'board-a', 'read', '--cad-upload', '--expires', '7d'])).toThrow()
+		expect(() => run(file, ['create', 'cad-agent', 'board-a,board-b', 'read-write', '--cad-upload', '--expires', '7d'])).toThrow()
+		expect(readFileSync(file, 'utf8')).toBe(before)
+	})
+
+	it('shows the capability in list and list --long, on that row only, and leaves every other row exactly as it was', () => {
+		const { file } = workspace()
+		writeStore(file, [fixture('plain')])
+		run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload', '--expires', '7d'])
+		const plain = run(file, ['list']).toString().trim().split('\n')
+		expect(plain).toEqual(['plain\tboard-a\tread,write', 'cad-agent\tboard-a\tread,write\tcapabilities=cad-upload'])
+		const long = run(file, ['list', '--long']).toString().trim().split('\n')
+		expect(long[0].split('\t')).toHaveLength(6)
+		expect(long[0].startsWith('plain\tboard-a\tread,write\t')).toBe(true)
+		expect(long[1].split('\t')).toHaveLength(7)
+		expect(long[1].endsWith('\tcapabilities=cad-upload')).toBe(true)
+	})
+
+	it('refuses the flag on revoke and list', () => {
+		const { file } = workspace()
+		run(file, ['create', 'cad-agent', 'board-a', 'read-write', '--cad-upload', '--expires', '7d'])
+		const before = readFileSync(file, 'utf8')
+		expect(() => run(file, ['revoke', 'cad-agent', '--cad-upload'])).toThrow()
+		expect(() => run(file, ['list', '--cad-upload'])).toThrow()
+		expect(readFileSync(file, 'utf8')).toBe(before)
+	})
+})

@@ -141,6 +141,11 @@ describe('machine hostname: only the machine API is served', () => {
 		expect(isMachineRoute('DELETE', '/api/rooms/board-a/canvas')).toBe(false)
 		expect(isMachineRoute('GET', '/api/boards/board-a/history/12/snapshot')).toBe(true)
 		expect(isMachineRoute('GET', '/api/boards/board-a/history/abc/snapshot')).toBe(false)
+		// image upload (ADR 014): exactly POST to one board's /images, and nothing that merely resembles it
+		expect(isMachineRoute('POST', '/api/boards/board-a/images')).toBe(true)
+		for (const [method, url] of [['GET', '/api/boards/board-a/images'], ['PUT', '/api/boards/board-a/images'], ['DELETE', '/api/boards/board-a/images'], ['POST', '/api/boards/board-a/images/'], ['POST', '/api/boards/board-a/images/x'], ['POST', '/api/boards/board-a/uploads/x']]) {
+			expect(isMachineRoute(method, url), `${method} ${url}`).toBe(false)
+		}
 		// board creation: exactly this method and path, and nothing that merely resembles it
 		expect(isMachineRoute('POST', '/api/agent-boards')).toBe(true)
 		expect(isMachineRoute('POST', '/api/agent-boards?x=1')).toBe(true)
@@ -173,6 +178,31 @@ describe('machine hostname: a browser session is never a machine credential', ()
 })
 
 describe('machine hostname: board-scoped token scopes', () => {
+	it('a write token creates one page, safely retries, and cannot create on another board', async () => {
+		const { app } = await setup()
+		const url = '/api/rooms/board-a/pages'
+		const payload = { id: 'page:lessons-learned', name: 'Lessons learned' }
+		const post = (token: string, body: unknown = payload, target = url) => app.inject({ method: 'POST', url: target, headers: machine(token), payload: body })
+		expect((await post(tokens.readerA)).statusCode).toBe(403)
+		expect((await post(tokens.readerB)).statusCode).toBe(403)
+		const created = await post(tokens.writerA)
+		expect(created.statusCode, created.body).toBe(200)
+		expect(created.json()).toMatchObject({ roomId: 'board-a', pageId: payload.id, name: payload.name, created: true })
+		const retry = await post(tokens.writerA)
+		expect(retry.statusCode, retry.body).toBe(200)
+		expect(retry.json()).toMatchObject({ pageId: payload.id, created: false, clock: created.json().clock })
+		expect((await post(tokens.writerA, { ...payload, name: 'Changed name' })).statusCode).toBe(409)
+		expect((await post(tokens.writerA, { ...payload, id: 'page:bad id' })).statusCode).toBe(422)
+		const canvas = await app.inject({ method: 'GET', url: `/api/rooms/board-a/canvas?pageId=${encodeURIComponent(payload.id)}`, headers: machine(tokens.writerA) })
+		expect(canvas.statusCode, canvas.body).toBe(200)
+		expect(canvas.json()).toMatchObject({ pageId: payload.id, objects: [] })
+		expect(canvas.json().pages.filter((page: { id: string }) => page.id === payload.id)).toHaveLength(1)
+		const shape = await app.inject({ method: 'POST', url: '/api/rooms/board-a/actions', headers: machine(tokens.writerA), payload: {
+			pageId: payload.id, actions: [{ tool: 'create_shape', id: 'shape:lesson-a', type: 'rectangle', text: 'Lesson A', x: 0, y: 0, width: 300, height: 200 }],
+		} })
+		expect(shape.statusCode, shape.body).toBe(200)
+		expect(shape.json().pageId).toBe(payload.id)
+	})
 	it('read scope: reads the semantic context and canvas, cannot write', async () => {
 		const { app } = await setup()
 		const context = await app.inject({ method: 'GET', url: '/api/rooms/board-a/semantic-context', headers: machine(tokens.readerA) })

@@ -23,6 +23,7 @@ import { AgentsPage } from '../client/agents/AgentsPage'
 import { CreateAgentForm } from '../client/agents/CreateAgentForm'
 import { SetupChecklist } from '../client/agents/SetupChecklist'
 import { TokenDialog } from '../client/agents/TokenDialog'
+import { buildSetupBlock } from '../client/help/agent-setup'
 import { createAgent, listAgents, listOwnedBoards, revokeAgent, rotateAgent } from '../client/agents/agents-api'
 import {
 	ACCESS_LEVELS,
@@ -244,6 +245,136 @@ describe('the one-time token', () => {
 		const state = tokenReducer(tokenReducer(null, { type: 'reveal', revealed }), { type: 'dismiss' })
 
 		expect(JSON.stringify(state)).toBe('null')
+	})
+})
+
+describe('the one-block setup', () => {
+	const viaCloudflare = { apiOrigin: 'https://api.example.test', viaCloudflare: true, guideUrl: 'https://app.example.test/agent-guide.md' }
+	const revealed: RevealedToken = { kind: 'created', agentTitle: 'Claude', boardName: 'Board', boardId: 'board-1', token: TOKEN }
+
+	it('puts the address, the whiteboard, the token and a first check in one block', () => {
+		const block = buildSetupBlock({ ...viaCloudflare, boardId: 'board-1', token: TOKEN })
+
+		expect(block).toContain('WHITEBOARD_API=https://api.example.test')
+		expect(block).toContain('WHITEBOARD_BOARD_ID=board-1')
+		expect(block).toContain(`WHITEBOARD_TOKEN=${TOKEN}`)
+		expect(block).toContain('/api/rooms/$WHITEBOARD_BOARD_ID/canvas')
+		// The token is written once, as the variable, and the check refers to it by name.
+		expect(block.split(TOKEN)).toHaveLength(2)
+	})
+
+	it('tells the agent where to read how to use the values, without putting that address in a command', () => {
+		const block = buildSetupBlock({ ...viaCloudflare, boardId: 'board-1', token: TOKEN })
+
+		expect(block).toContain('# How to use these values: read https://app.example.test/agent-guide.md')
+		expect(buildSetupBlock({ apiOrigin: 'https://api.example.test', boardId: null, token: TOKEN, viaCloudflare: true })).not.toContain('agent-guide')
+	})
+
+	it('leaves the two Cloudflare lines empty, because this page never sees them', () => {
+		const block = buildSetupBlock({ ...viaCloudflare, boardId: 'board-1', token: TOKEN })
+
+		expect(block).toMatch(/^CF_ACCESS_CLIENT_ID=$/m)
+		expect(block).toMatch(/^CF_ACCESS_CLIENT_SECRET=$/m)
+		expect(block).toContain('CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID')
+	})
+
+	it('omits every Cloudflare line when no separate machine hostname is configured', () => {
+		const block = buildSetupBlock({ apiOrigin: 'http://your-server', viaCloudflare: false, boardId: 'board-1', token: TOKEN })
+
+		expect(block).not.toMatch(/CF_ACCESS|CF-Access/)
+	})
+
+	it('checks health, and names no whiteboard, for an agent that creates its own', () => {
+		const block = buildSetupBlock({ ...viaCloudflare, boardId: null, token: TOKEN })
+
+		expect(block).not.toContain('WHITEBOARD_BOARD_ID')
+		expect(block).toContain('$WHITEBOARD_API/api/health')
+	})
+
+	describe('the walk-through at the top', () => {
+		const full = () => buildSetupBlock({ ...viaCloudflare, boardId: 'board-1', token: TOKEN })
+		const direct = () => buildSetupBlock({ apiOrigin: 'http://your-server', viaCloudflare: false, boardId: 'board-1', token: TOKEN })
+		const steps = (block: string) => block.split('\n').filter((line) => /^# Step \d+\. /.test(line))
+
+		it('speaks to the agent first, so pasting the whole block into an agent starts a guided setup', () => {
+			const block = full()
+
+			expect(block.split('\n')[0]).toBe('# ===== Instructions for the AI agent reading this =====')
+			expect(block).toContain('Walk them through the steps below one at a time, in plain language.')
+			expect(block.indexOf('Instructions for the AI agent')).toBeLessThan(block.indexOf('WHITEBOARD_API='))
+		})
+
+		it('stays valid pasted into an environment file: every line is a comment, an assignment, a blank, or the one check command', () => {
+			for (const block of [full(), direct(), buildSetupBlock({ ...viaCloudflare, boardId: null, token: TOKEN })]) {
+				for (const line of block.split('\n').filter((candidate) => candidate.length > 0)) {
+					expect(line, line).toMatch(/^(# |#$|[A-Z_]+=|curl -sS )/)
+				}
+			}
+		})
+
+		it('numbers its steps 1, 2, 3 in order, in full and without the Cloudflare and guide steps', () => {
+			expect(steps(full()).map((line) => line.slice(0, 8))).toEqual(['# Step 1', '# Step 2', '# Step 3', '# Step 4', '# Step 5'])
+			expect(steps(buildSetupBlock({ apiOrigin: 'http://your-server', viaCloudflare: false, boardId: 'board-1', token: TOKEN })).map((line) => line.slice(0, 8))).toEqual(['# Step 1', '# Step 2', '# Step 3'])
+		})
+
+		it('explains how to get the two Cloudflare values, and says what 403, 401 and 404 mean, only when a Cloudflare layer exists', () => {
+			const block = full()
+
+			expect(block).toContain('Get the two Cloudflare values. They are empty on purpose')
+			expect(block).toMatch(/Service Auth policy that includes that token/)
+			expect(block).toMatch(/403 means the Cloudflare pair is missing/)
+			expect(block).toMatch(/401 means the whiteboard token is wrong/)
+			expect(block).toMatch(/404 means the board id is wrong/)
+			const plain = direct()
+			expect(plain).not.toMatch(/Cloudflare|403/i)
+			expect(plain).toMatch(/401 means the whiteboard token is wrong/)
+		})
+
+		it('never asks for the secret to be pasted into a chat, and tells the agent not to print or repeat it', () => {
+			const block = full()
+
+			expect(block).toContain('Never print or log the token or any secret, and never ask them to put one in a chat, a document, a ticket or Git.')
+			expect(block).toContain('they should save both values into your secret store themselves')
+			expect(block).toContain('Do not repeat them back to the person.')
+		})
+
+		it('writes the token exactly once however long the instructions are, and never names a value in them', () => {
+			for (const block of [full(), direct()]) {
+				expect(block.split(TOKEN)).toHaveLength(2)
+				expect(block.split('\n').filter((line) => line.startsWith('#')).join('\n')).not.toContain(TOKEN)
+			}
+		})
+
+		it('points at the guide only when there is a guide address to point at', () => {
+			expect(full()).toContain('Read the guide at the address on the "How to use these values" line')
+			const noGuide = buildSetupBlock({ apiOrigin: 'https://api.example.test', viaCloudflare: true, boardId: 'board-1', token: TOKEN })
+			expect(noGuide).not.toContain('guide')
+			expect(noGuide).not.toContain('How to use these values')
+		})
+
+		it('for an agent that creates its own whiteboards: says the check does not test the token, and asks which whiteboard to create', () => {
+			const block = buildSetupBlock({ ...viaCloudflare, boardId: null, token: TOKEN })
+
+			expect(block).toContain('Check the service.')
+			expect(block).toContain('it does not test the token')
+			expect(block).toContain('ask what whiteboard they want you to create first')
+			expect(block).not.toMatch(/404 means the board id/)
+		})
+	})
+
+	it('is shown in the dialog only once the address is known, with its own copy button', () => {
+		const withBlock = html(createElement(TokenDialog, { revealed, connection: viaCloudflare, onDismiss: () => undefined }))
+		const without = html(createElement(TokenDialog, { revealed, connection: null, onDismiss: () => undefined }))
+
+		expect(withBlock).toContain('Copy full setup')
+		expect(withBlock).toContain('Paste all of this into your AI agent as your first message and it will walk you through the rest')
+		expect(withBlock).toContain('The agent sees the token in that conversation, so use an agent you trust.')
+		expect(withBlock).toContain('Instructions for the AI agent reading this')
+		expect(withBlock).toContain('WHITEBOARD_API=https://api.example.test')
+		expect(without).not.toContain('Copy full setup')
+		expect(without).not.toContain('WHITEBOARD_API')
+		// The plain token is still copyable either way.
+		expect(without).toContain('Copy token')
 	})
 })
 

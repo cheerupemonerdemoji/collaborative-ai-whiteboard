@@ -72,11 +72,11 @@ Before anything you might want to undo in bulk: a major experiment, a design cha
 
 ### What happens if my connection drops?
 
-Your changes are sent to the board as you make them. If you lose your connection, changes you make while offline may not be saved. Once you are back online, the board normally reconnects by itself; if it does not look right, refresh the page and check that your latest work is there. Do not rely on offline edits being kept.
+The header changes from **Live** to **Reconnecting…**. Keep the tab open: it reconnects automatically and catches up with other people's changes. Edits made while disconnected have not necessarily reached the server; closing or refreshing the tab can lose them.
 
 ### When should I refresh?
 
-- After your connection was interrupted and the board does not seem to be updating.
+- To load a newly deployed app version, after your connection has recovered and your edits have synced.
 - If the Inspector or History list looks out of date — try the panel's **Refresh** button first.
 - After your role has been changed, to make sure you see the right buttons.
 

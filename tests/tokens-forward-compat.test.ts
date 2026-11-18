@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { authorizeApiToken } from '../server/tokens'
+import { authorizeApiCapability, authorizeApiToken } from '../server/tokens'
 
 const digest = (token: string) => createHash('sha256').update(token).digest('hex')
 const previous = process.env.CANVAS_API_TOKENS_FILE
@@ -120,5 +120,39 @@ describe('tolerance is not laxity', () => {
 		const token = randomBytes(32).toString('base64url')
 		storeContaining({ clients: [legacyClient(token)] })
 		expect(authorizeApiToken(`Bearer ${randomBytes(32).toString('base64url')}`, 'board-a', 'read')).toBeNull()
+	})
+})
+
+describe('a malformed capabilities field never locks anyone out', () => {
+	const cadRecord = (token: string, capabilities: unknown) => ({
+		name: 'cad-b', tokenHash: digest(token), rooms: ['board-a'], permissions: ['read', 'write'],
+		expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(), capabilities,
+	})
+
+	for (const [label, value] of [
+		['a string', 'cad-upload'],
+		['a number inside a list', [1]],
+		['a nested list', [['cad-upload']]],
+		['nine entries', Array.from({ length: 9 }, (_, index) => `capability-${index}`)],
+		['an entry that is too long', ['x'.repeat(41)]],
+		['an object', { 'cad-upload': true }],
+		['null', null],
+	] as Array<[string, unknown]>) {
+		it(`keeps every other agent working, and refuses the capability, when it is ${label}`, () => {
+			const a = randomBytes(32).toString('base64url')
+			const b = randomBytes(32).toString('base64url')
+			storeContaining({ clients: [legacyClient(a), cadRecord(b, value)] })
+			expect(authorizeApiToken(`Bearer ${a}`, 'board-a', 'read')).toBe('legacy-a')
+			expect(authorizeApiCapability(`Bearer ${b}`, 'board-a', 'cad-upload')).toBeNull()
+			// Only the capability is lost: the credential still does what its permissions allow.
+			expect(authorizeApiToken(`Bearer ${b}`, 'board-a', 'write')).toBe('cad-b')
+		})
+	}
+
+	it('honours a well-formed capability, and ignores one it has never heard of without losing the one it knows', () => {
+		const b = randomBytes(32).toString('base64url')
+		storeContaining({ clients: [cadRecord(b, ['cad-upload', 'something-a-future-version-adds'])] })
+		expect(authorizeApiCapability(`Bearer ${b}`, 'board-a', 'cad-upload')).toBe('cad-b')
+		expect(authorizeApiCapability(`Bearer ${b}`, 'board-a', 'something-else')).toBeNull()
 	})
 })

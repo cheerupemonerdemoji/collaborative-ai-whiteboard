@@ -9,7 +9,8 @@ import type { RawData, WebSocket } from 'ws'
 import { z, ZodError } from 'zod'
 import { AuthError, AuthService, type CurrentSession, type LegacyBoardInput } from './auth'
 import type { BoardRole } from './auth-db'
-import { applyRoomActions, CanvasApiError, readRoomCanvas, readRoomLayout, readRoomSemantics } from './canvas-api'
+import { applyRoomActions, CanvasApiError, createRoomPage, readRoomCanvas, readRoomLayout, readRoomSemantics, readShapeContent } from './canvas-api'
+import { listShapeHistory, restoreShapeContent, RESTORE_MODES } from './shape-recovery'
 import { HttpError } from './http'
 import {
 	appendRoomEvent,
@@ -37,14 +38,22 @@ import {
 	SlidingWindowRateLimiter,
 } from './security'
 import { registerAgentAccessRoutes } from './agent-access'
+import { renderAgentGuide } from './agent-guide'
 import { registerAgentBoardsRoutes } from './agent-boards'
+import { cadContentType, storeCadArtifact } from './cad-artifacts'
+import { IMAGE_LIMITS, imageContentType, inspectImage, readStoredImage } from './image-artifacts'
+import { registerCadRoutes } from './cad-routes'
+import { loadTelemetryRegistry, type TelemetryRegistry } from './telemetry'
+import { registerTelemetryRoutes } from './telemetry-routes'
+import { CadModelError } from '../shared/cad-model'
 import { readMeasurements, saveMeasurements } from './layout-measurements'
 import { measurementReportSchema } from '../shared/layout'
 import { createAccessVerifier } from './access-jwt'
 import { createHostPolicy, hostPolicyFromEnv, isMachineRoute, type HostPolicyConfig } from './host-policy'
-import { authenticateBoardCreator, authorizeApiToken, type ApiPermission } from './tokens'
+import { authenticateBoardCreator, authorizeApiCapability, authorizeApiToken, describeApiToken, type ApiPermission } from './tokens'
+import { CAD_UPLOAD_CAPABILITY } from './token-store.mjs'
 import { evidenceTableArtifactId, EVIDENCE_TABLE_LIMITS, evidenceTableSchema, summaryForTable } from '../shared/evidence-tables'
-import type { HistoryEvent, HistoryEventFilters, HistorySource, HistoryEventType } from '../shared/history'
+import type { HistoryEventFilters, HistorySource, HistoryEventType } from '../shared/history'
 
 export interface RateLimitSetting {
 	limit: number
@@ -68,6 +77,8 @@ export interface RateLimitOptions {
 	agentAccess?: RateLimitSetting
 	/** Browser reports of measured text and note sizes, per signed-in user and board. */
 	layoutReport?: RateLimitSetting
+	/** Telemetry card polls, per signed-in user and board. */
+	telemetry?: RateLimitSetting
 	/** Boards a single board-creating credential may create per window. */
 	agentBoardCredential?: RateLimitSetting
 	/** Boards all of one owner's board-creating credentials together may create per window. */
@@ -82,6 +93,8 @@ export interface BuildAppOptions {
 	rateLimits?: RateLimitOptions
 	/** Public hostname classes; defaults to the CANVAS_PUBLIC_HOST / CANVAS_MACHINE_API_HOST / CANVAS_ACCESS_* environment. */
 	hostPolicy?: HostPolicyConfig
+	/** Read-only telemetry sources and their board bindings; defaults to the CANVAS_TELEMETRY_SOURCES environment (none when unset). */
+	telemetry?: TelemetryRegistry
 }
 
 const ALL_PERMISSIONS: readonly ApiPermission[] = ['read', 'write', 'history', 'restore']
@@ -119,6 +132,9 @@ const AGENT_BOARD_WINDOW_MS = 60 * 60_000
 // A browser reports measurements after edits, debounced; generous for one active editor, cheap to refuse beyond that.
 const LAYOUT_REPORT_LIMIT = 120
 const LAYOUT_REPORT_WINDOW_MS = 60_000
+// A telemetry card polls every few seconds; a board with several cards and several tabs stays well under this.
+const TELEMETRY_READ_LIMIT = 240
+const TELEMETRY_READ_WINDOW_MS = 60_000
 const AI_EVENT_TYPES = [
 	'ai.requested',
 	'ai.suggestion_generated',
@@ -160,6 +176,15 @@ const historyRestoreSchema = z.object({
 	eventId: z.number().int().positive(),
 	expectedClock: z.number().int().nonnegative(),
 }).strict()
+const shapeIdSchema = z.string().regex(/^shape:[A-Za-z0-9_-]{1,80}$/)
+/** Recover one shape's content from an earlier revision. `expectedCurrentRevision` is mandatory: a recovery acts on the revision the caller actually inspected. */
+const shapeRestoreSchema = z.object({
+	revision: z.number().int().nonnegative().optional(),
+	eventId: z.number().int().positive().optional(),
+	expectedCurrentRevision: z.number().int().nonnegative(),
+	mode: z.enum(RESTORE_MODES).default('content'),
+	dryRun: z.boolean().default(false),
+}).strict().refine((body) => body.revision !== undefined || body.eventId !== undefined, { message: 'Name the revision or the eventId to restore from' })
 const aiEventSchema = z.object({
 	eventType: z.enum(AI_EVENT_TYPES),
 	metadata: z.record(z.string(), z.unknown()).optional(),
@@ -318,9 +343,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		}
 		const session = currentSession(request)
 		if (!session) return { kind: 'anonymous' }
-		const role = authService.getBoardRole(session.user.id, boardId, false)
-		if (!role) return { kind: 'not_member' }
-		return { kind: 'user', userId: session.user.id, displayName: session.user.displayName, role }
+		const resolved = authService.getBoardAccess(session.user.id, boardId, false)
+		if (!resolved) return { kind: 'not_member' }
+		if (resolved.via === 'site-owner') authService.auditSiteOwnerAccess(session.user.id, boardId, 'http.access')
+		return { kind: 'user', userId: session.user.id, displayName: session.user.displayName, role: resolved.role }
 	}
 
 	function denyAccess(reply: FastifyReply, access: BoardAccess) {
@@ -339,7 +365,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		return access.kind === 'user'
 	}
 
-	function resolveActors(events: readonly HistoryEvent[]): Array<{ id: string; displayName: string }> {
+	function resolveActors(events: ReadonlyArray<{ actorUserId: string | null }>): Array<{ id: string; displayName: string }> {
 		const actorIds = new Set<string>()
 		for (const event of events) {
 			if (event.actorUserId) actorIds.add(event.actorUserId)
@@ -428,6 +454,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
 	app.get('/api/health', async () => ({ ok: true, service: 'collaborative-ai-canvas' }))
 
+	// What an agent reads to learn how to connect. Public on purpose (no sign-in, so it works before anyone has given
+	// the agent credentials) and static: it holds no secret and no per-agent value. On the machine hostname it is
+	// not in the route allowlist, so it is a 404 there, after the Cloudflare Access check like everything else.
+	app.get('/agent-guide.md', async (_request, reply) => {
+		reply.header('Content-Type', 'text/plain; charset=utf-8').header('Cache-Control', 'public, max-age=300')
+		return renderAgentGuide({ agentApiOrigin: hostPolicy.machineHost ? `https://${hostPolicy.machineHost}` : null })
+	})
+
 	app.get('/api/auth/me', async (request, reply) => {
 		const session = currentSession(request)
 		if (!session) return reply.code(401).send({ error: 'Authentication required' })
@@ -481,8 +515,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	app.get('/api/boards', async (request, reply) => {
 		const session = currentSession(request)
 		if (!session) return reply.code(401).send({ error: 'Authentication required' })
-		const includeDeleted = (request.query as { includeDeleted?: string }).includeDeleted === 'true'
-		return { boards: authService.listBoards(session.user.id, includeDeleted) }
+		const query = request.query as { includeDeleted?: string; scope?: string }
+		const includeDeleted = query.includeDeleted === 'true'
+		// `scope=all` is the site-owner view; the service refuses it for everyone else.
+		return { boards: authService.listBoards(session.user.id, includeDeleted, query.scope === 'all' ? 'all' : 'mine') }
 	})
 
 	app.post('/api/boards', async (request, reply) => {
@@ -530,6 +566,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 				: access.kind === 'user' && userRoleHasWrite(access.role)
 			if (!allowed) return denyAccess(reply, access)
 			if (!snapshotLimiter.allow(accessRateKey(access, 'restore', boardId))) return tooManyRequests(reply, 'restore requests')
+			// Every restore under the site-owner override is recorded individually, never collapsed.
+			if (access.kind === 'user') authService.auditSiteOwnerAccess(access.userId, boardId, 'history.restore', 0)
 			const actor = historyActor(access)
 			const handle = getRoomHandle(boardId)
 			return restoreRoomVersion(handle, {
@@ -571,7 +609,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	registerAgentAccessRoutes(app, {
 		// Session cookie only: a machine bearer token can never manage agents.
 		currentUser: (request) => currentSession(request)?.user ?? null,
-		boardRole: (userId, boardId, includeDeleted = false) => authService.getBoardRole(userId, boardId, includeDeleted),
+		// Strict membership first; agent-access applies the site-owner override only where this refuses (ADR 011).
+		boardRole: (userId, boardId, includeDeleted = false) => authService.getMembershipRole(userId, boardId, includeDeleted),
+		isSiteOwner: (userId) => authService.isSiteOwner(userId),
+		boardExists: (boardId, includeDeleted = false) => authService.boardExists(boardId, includeDeleted),
 		recordEvent: (event) => authService.database.insertAccountEvent({
 			eventId: randomUUID(),
 			type: event.type,
@@ -583,6 +624,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		}),
 		allow: (userId) => agentAccessLimiter.allow(`agents:${userId}`),
 		storePath: () => process.env.CANVAS_API_TOKENS_FILE || undefined,
+		agentApiOrigin: () => (hostPolicy.machineHost ? `https://${hostPolicy.machineHost}` : null),
+		createBoard: (ownerUserId, name, agentName) => authService.createBoard(ownerUserId, name, undefined, { agent: agentName }),
+		removeBoard: (ownerUserId, boardId, agentName) => {
+			authService.deleteBoard(ownerUserId, boardId, { agent: agentName, reason: 'initial-grant-not-persisted' })
+		},
 	})
 
 	registerAgentBoardsRoutes(app, {
@@ -661,8 +707,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			if (!originAllowed(request.headers.origin, allowed)) {
 				return refuse(1008, 'Origin not allowed')
 			}
-			const role = authService.getBoardRole(current.user.id, roomId, false)
-			if (!role) return refuse(1008, 'Not found')
+			const resolved = authService.getBoardAccess(current.user.id, roomId, false)
+			if (!resolved) return refuse(1008, 'Not found')
+			const role = resolved.role
+			if (resolved.via === 'site-owner') authService.auditSiteOwnerAccess(current.user.id, roomId, 'socket.connect')
 			const handle = getRoomHandle(roomId)
 			const caughtMessages: RawData[] = []
 			const collect = (message: RawData) => caughtMessages.push(message)
@@ -696,6 +744,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		const pageId = (request.query as { pageId?: string }).pageId
 		reply.header('Cache-Control', 'no-store')
 		return { roomId, ...readRoomCanvas(getRoomHandle(roomId).room, pageId) }
+	})
+
+	app.post('/api/rooms/:roomId/pages', async (request, reply) => {
+		const roomId = parseRoomId((request.params as { roomId: string }).roomId)
+		if (!roomId) return reply.code(400).send({ error: 'Invalid room ID' })
+		const access = resolveBoardAccess(request, roomId)
+		const allowed = access.kind === 'token'
+			? access.permissions.has('write')
+			: access.kind === 'user' && userRoleHasWrite(access.role)
+		if (!allowed) return denyAccess(reply, access)
+		if (!writeLimiter.allow(accessRateKey(access, 'pages', roomId))) return tooManyRequests(reply, 'page writes')
+		const actor = historyActor(access)
+		const handle = getRoomHandle(roomId)
+		const result = withRoomHistory(handle, {
+			actorUserId: actor.actorUserId,
+			actorDisplayName: actor.displayName,
+			sessionId: null,
+			source: access.kind === 'token' ? 'ai' : 'human',
+			immediate: true,
+		}, () => createRoomPage(handle.room, request.body))
+		reply.header('Cache-Control', 'no-store')
+		return { roomId, ...result }
 	})
 
 	app.get('/api/rooms/:roomId/layout', async (request, reply) => {
@@ -733,6 +803,91 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		return saveMeasurements(handle.database, report.measurements, current, `user:${access.userId}`)
 	})
 
+	// The complete content of ONE shape: full rich text, exact length, revision and the digest an update presents to prove it read the full content.
+	app.get('/api/rooms/:roomId/shapes/:shapeId', async (request, reply) => {
+		const params = request.params as { roomId: string; shapeId: string }
+		const roomId = parseRoomId(params.roomId)
+		if (!roomId) return reply.code(400).send({ error: 'Invalid room ID' })
+		const shapeId = shapeIdSchema.safeParse(params.shapeId)
+		if (!shapeId.success) return reply.code(400).send({ error: 'Invalid shape ID' })
+		const access = resolveBoardAccess(request, roomId)
+		if (access.kind === 'token') {
+			if (!access.permissions.has('read')) return denyAccess(reply, access)
+			if (!machineReadLimiter.allow(accessRateKey(access, 'shape-read', roomId))) return tooManyRequests(reply, 'reads')
+		} else if (access.kind !== 'user') {
+			return denyAccess(reply, access)
+		}
+		reply.header('Cache-Control', 'no-store')
+		return { roomId, ...readShapeContent(getRoomHandle(roomId).room, shapeId.data) }
+	})
+
+	// Exact earlier contents of one shape. History permission is enough to inspect; this never needs the board-wide restore scope.
+	app.get('/api/boards/:boardId/shapes/:shapeId/history', async (request, reply) => {
+		const params = request.params as { boardId: string; shapeId: string }
+		const boardId = parseRoomId(params.boardId)
+		if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
+		const shapeId = shapeIdSchema.safeParse(params.shapeId)
+		if (!shapeId.success) return reply.code(400).send({ error: 'Invalid shape ID' })
+		const access = resolveBoardAccess(request, boardId)
+		if (!requireHistoryView(access)) return denyAccess(reply, access)
+		if (access.kind === 'token' && !machineReadLimiter.allow(accessRateKey(access, 'shape-history', boardId))) return tooManyRequests(reply, 'history reads')
+		const query = request.query as Record<string, string | undefined>
+		const limit = parseHistoryFilterNumber(query.limit)
+		const before = parseHistoryFilterNumber(query.before)
+		if (limit === null || before === null) return reply.code(400).send({ error: 'Invalid history filter' })
+		const result = listShapeHistory(getRoomHandle(boardId), shapeId.data, { ...(limit === undefined ? {} : { limit }), ...(before === undefined ? {} : { beforeEventId: before }) })
+		reply.header('Cache-Control', 'no-store')
+		return { boardId, ...result, actors: resolveActors(result.events) }
+	})
+
+	// Recover ONE shape's content from an earlier revision. A preview (dryRun) needs only History; the write needs History AND write. Not the board-wide restore scope.
+	app.post('/api/boards/:boardId/shapes/:shapeId/restore', async (request, reply) => {
+		const params = request.params as { boardId: string; shapeId: string }
+		const boardId = parseRoomId(params.boardId)
+		if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
+		const shapeId = shapeIdSchema.safeParse(params.shapeId)
+		if (!shapeId.success) return reply.code(400).send({ error: 'Invalid shape ID' })
+		const access = resolveBoardAccess(request, boardId)
+		if (!requireHistoryView(access)) return denyAccess(reply, access)
+		const body = shapeRestoreSchema.parse(request.body ?? {})
+		const canWrite = access.kind === 'token' ? access.permissions.has('write') : access.kind === 'user' && userRoleHasWrite(access.role)
+		if (!body.dryRun && !canWrite) return denyAccess(reply, access)
+		const limiter = body.dryRun ? machineReadLimiter : writeLimiter
+		if (!limiter.allow(accessRateKey(access, body.dryRun ? 'shape-restore-preview' : 'shape-restore', boardId))) return tooManyRequests(reply, 'shape recoveries')
+		const actor = historyActor(access)
+		reply.header('Cache-Control', 'no-store')
+		const result = restoreShapeContent(getRoomHandle(boardId), {
+			shapeId: shapeId.data, expectedCurrentRevision: body.expectedCurrentRevision, mode: body.mode, dryRun: body.dryRun,
+			...(body.eventId === undefined ? {} : { eventId: body.eventId }), ...(body.revision === undefined ? {} : { revision: body.revision }),
+			actor: { actorUserId: actor.actorUserId, displayName: actor.displayName }, source: access.kind === 'token' ? 'ai' : 'human',
+		})
+		return { boardId, ...result }
+	})
+
+	// What this credential may do, so an agent can find out BEFORE it starts a workflow it could not finish. Never a hash, fingerprint or secret.
+	app.get('/api/agent-session', async (request, reply) => {
+		const info = describeApiToken(request.headers.authorization)
+		if (!info) return reply.code(401).send({ error: 'A valid agent bearer token is required' })
+		if (!machineReadLimiter.allow(`token:${info.name}:agent-session`)) return tooManyRequests(reply, 'reads')
+		const boardParam = (request.query as { boardId?: string }).boardId
+		const live = (id: string) => { const board = authService.database.getBoardById(id); return Boolean(board && !board.deletedAt) }
+		const has = (permission: ApiPermission) => info.permissions.includes(permission)
+		const capabilities = {
+			canRead: has('read'), canWrite: has('write'), canViewHistory: has('history'),
+			canRecoverShapes: has('history') && has('write'),
+			canRestoreBoard: has('restore'),
+		}
+		reply.header('Cache-Control', 'no-store')
+		const base = { agent: info.name, kind: info.kind, ...(info.expiresAt === undefined ? {} : { expiresAt: info.expiresAt }), accountCapabilities: info.accountPermissions }
+		if (boardParam !== undefined) {
+			const boardId = parseRoomId(boardParam)
+			if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
+			const reaches = info.rooms.includes(boardId) && live(boardId)
+			return { ...base, boardId, boardAccess: reaches, permissions: reaches ? [...info.permissions] : [], ...(reaches ? capabilities : { canRead: false, canWrite: false, canViewHistory: false, canRecoverShapes: false, canRestoreBoard: false }) }
+		}
+		return { ...base, permissions: [...info.permissions], ...capabilities, boards: info.rooms.filter(live) }
+	})
+
 	app.post('/api/rooms/:roomId/actions', async (request, reply) => {
 		const roomId = parseRoomId((request.params as { roomId: string }).roomId)
 		if (!roomId) return reply.code(400).send({ error: 'Invalid room ID' })
@@ -750,7 +905,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 			sessionId: null,
 			source: access.kind === 'token' ? 'ai' : 'human',
 			immediate: true,
-		}, () => applyRoomActions(handle.room, request.body, actor, (uploadId) => authService.database.assetBelongsToBoard(uploadId, roomId), { measurements: readMeasurements(handle.database) }))
+		}, () => applyRoomActions(handle.room, request.body, actor, (uploadId) => authService.database.assetBelongsToBoard(uploadId, roomId), { measurements: readMeasurements(handle.database), images: { boardId: roomId, read: (assetId) => readStoredImage(assetDirectory, assetId) } }))
 		reply.header('Cache-Control', 'no-store')
 		return { roomId, ...result }
 	})
@@ -896,10 +1051,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		if (!/^[A-Za-z0-9._-]{1,180}$/.test(params.uploadId) || params.uploadId.includes('..') || !Buffer.isBuffer(request.body)) {
 			return reply.code(400).send({ error: 'Invalid upload' })
 		}
+		// `cad-*` names are content-addressed and validated by the CAD artifact route (server/cad-routes.ts). Letting
+		// this unvalidated route write one would let a file be planted under another file's hash.
+		// The same goes for `img-*`, which the image route (POST /api/boards/:boardId/images) validates and names by hash.
+		if (params.uploadId.startsWith('cad-') || params.uploadId.startsWith('img-')) return reply.code(400).send({ error: 'Invalid upload' })
 		const role = authService.getBoardRole(session.user.id, params.boardId, false)
 		if (!role) return reply.code(404).send({ error: 'Board not found' })
 		if (!userRoleHasWrite(role)) return reply.code(403).send({ error: 'You do not have permission to upload to this board' })
 		if (!uploadLimiter.allow(`user:${session.user.id}:${params.boardId}`)) return tooManyRequests(reply, 'uploads')
+		authService.auditSiteOwnerAccess(session.user.id, params.boardId, 'asset.upload')
 		const path = join(assetDirectory, params.uploadId)
 		if (existsSync(path)) return reply.code(409).send({ error: 'Upload already exists' })
 		await import('node:fs/promises').then(({ writeFile }) => writeFile(path, request.body as Buffer, { flag: 'wx' }))
@@ -925,6 +1085,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		if (!role) return reply.code(404).send({ error: 'Board not found' })
 		if (!userRoleHasWrite(role)) return reply.code(403).send({ error: 'You do not have permission to upload to this board' })
 		if (!uploadLimiter.allow(`user:${session.user.id}:${params.boardId}`)) return tooManyRequests(reply, 'uploads')
+		authService.auditSiteOwnerAccess(session.user.id, params.boardId, 'asset.upload')
 		const table = evidenceTableSchema.parse(request.body)
 		const serialized = JSON.stringify(table)
 		if (Buffer.byteLength(serialized, 'utf8') > EVIDENCE_TABLE_LIMITS.maxSerializedBytes) {
@@ -947,6 +1108,37 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		return { uploadId, summary: summaryForTable(table) }
 	})
 
+	/**
+	 * Image upload for a credential with write access to this board, or an editor (the agent images and links design note).
+	 * The file is inspected as bytes (type, size, pixel count), stored under its own hash, and counted against a per-board cap that
+	 * is reserved before any file is written, so a flood cannot write past it. The reply gives the name to place it with `create_image`.
+	 */
+	app.post('/api/boards/:boardId/images', async (request, reply) => {
+		const boardId = parseRoomId((request.params as { boardId: string }).boardId)
+		if (!boardId) return reply.code(400).send({ error: 'Invalid board ID' })
+		const access = resolveBoardAccess(request, boardId)
+		const allowed = access.kind === 'token' ? access.permissions.has('write') : access.kind === 'user' && userRoleHasWrite(access.role)
+		if (!allowed) return denyAccess(reply, access)
+		if (!uploadLimiter.allow(accessRateKey(access, 'image-upload', boardId))) return tooManyRequests(reply, 'image uploads')
+		const inspected = inspectImage(request.body)
+		const { assetId } = inspected
+		const register = () => authService.database.registerBoardAssetIfUnderCap(boardId, assetId, 'img-', IMAGE_LIMITS.maxImagesPerBoard)
+		const limit = () => new HttpError(422, 'This board has reached its image limit')
+		const reserved = !authService.database.assetBelongsToBoard(assetId, boardId)
+		if (reserved && !register()) throw limit()
+		try {
+			await storeCadArtifact(assetDirectory, assetId, inspected.data)
+			if (!authService.database.assetBelongsToBoard(assetId, boardId) && !register()) throw limit()
+		} catch (error) {
+			if (reserved && !existsSync(join(assetDirectory, assetId))) authService.database.unregisterBoardAsset(boardId, assetId)
+			throw error
+		}
+		const actor = historyActor(access)
+		request.log.info({ audit: 'image.uploaded', actor: actor.actorUserId, boardId, assetId, bytes: inspected.bytes }, 'image stored')
+		reply.header('Cache-Control', 'no-store')
+		return reply.code(201).send({ image: { assetId, mimeType: inspected.mimeType, width: inspected.width, height: inspected.height, bytes: inspected.bytes } })
+	})
+
 	app.get('/api/boards/:boardId/assets/:uploadId', async (request, reply) => {
 		const session = currentSession(request)
 		if (!session) return reply.code(401).send({ error: 'Authentication required' })
@@ -956,11 +1148,36 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 		}
 		if (!authService.getBoardRole(session.user.id, params.boardId, false)) return reply.code(404).send({ error: 'Not found' })
 		if (!assetReadLimiter.allow(`user:${session.user.id}:${params.boardId}`)) return tooManyRequests(reply, 'asset reads')
-		if (!authService.database.canReadAsset(session.user.id, params.boardId, params.uploadId)) return reply.code(404).send({ error: 'Not found' })
+		if (!authService.canReadBoardAsset(session.user.id, params.boardId, params.uploadId)) return reply.code(404).send({ error: 'Not found' })
 		const path = join(assetDirectory, params.uploadId)
 		if (!existsSync(path)) return reply.code(404).send({ error: 'Not found' })
 		reply.header('Content-Security-Policy', "default-src 'none'").header('X-Content-Type-Options', 'nosniff')
+		const cadType = params.uploadId.startsWith('cad-') ? cadContentType(params.uploadId) : null
+		if (cadType) reply.header('Content-Type', cadType)
+		// An agent-uploaded image is served as exactly the image type its bytes were checked to be, and nothing else.
+		const imageType = params.uploadId.startsWith('img-') ? imageContentType(params.uploadId) : null
+		if (imageType) reply.header('Content-Type', imageType)
 		return reply.send(createReadStream(path))
+	})
+
+	registerCadRoutes(app, {
+		currentSession,
+		boardRole: (userId, boardId) => authService.getBoardRole(userId, boardId, false),
+		assetBelongsToBoard: (uploadId, boardId) => authService.database.assetBelongsToBoard(uploadId, boardId),
+		registerAssetIfUnderCap: (boardId, uploadId, prefix, max) => authService.database.registerBoardAssetIfUnderCap(boardId, uploadId, prefix, max),
+		unregisterAsset: (boardId, uploadId) => authService.database.unregisterBoardAsset(boardId, uploadId),
+		assetDirectory,
+		uploadLimiter,
+		writeLimiter,
+		machineCadClient: (authorization, boardId) => authorizeApiCapability(authorization, boardId, CAD_UPLOAD_CAPABILITY),
+		boardIsLive: (boardId) => { const board = authService.database.getBoardById(boardId); return Boolean(board && !board.deletedAt) },
+	})
+
+	registerTelemetryRoutes(app, {
+		currentSession,
+		boardRole: (userId, boardId) => authService.getBoardRole(userId, boardId, false),
+		registry: options.telemetry ?? loadTelemetryRegistry(process.env, { onFailure: ({ sourceId, category }) => app.log.warn({ sourceId, category }, 'telemetry read failed') }),
+		readLimiter: limiterFor(options.rateLimits?.telemetry, TELEMETRY_READ_LIMIT, TELEMETRY_READ_WINDOW_MS),
 	})
 
 	app.get('/api/unfurl', async () => ({ title: '', description: '', image: '', favicon: '' }))
@@ -968,8 +1185,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 	app.setErrorHandler((error, request, reply) => {
 		if (error instanceof AuthError) return reply.code(error.statusCode).send({ error: error.message, code: error.code })
 		if (error instanceof RoomRestoreError) return reply.code(error.statusCode).send({ error: error.message })
-		if (error instanceof CanvasApiError) return reply.code(error.statusCode).send({ error: error.message })
+		if (error instanceof CanvasApiError) return reply.code(error.statusCode).send({ error: error.message, ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) })
 		if (error instanceof HttpError) return reply.code(error.statusCode).send({ error: error.message })
+		if (error instanceof CadModelError) return reply.code(error.statusCode).send({ error: error.message })
+		// A request body over the parser's limit (20 MB for a binary upload) is the caller's error, not a server fault.
+		if ((error as { code?: string }).code === 'FST_ERR_CTP_BODY_TOO_LARGE') return reply.code(413).send({ error: 'This request body is too large' })
 		if (error instanceof ZodError) return reply.code(422).send({
 			error: 'Invalid request',
 			details: error.issues.map(({ path, message }) => ({ path, message })),

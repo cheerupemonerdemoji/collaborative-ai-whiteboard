@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { z } from 'zod'
-import { BOARD_CREATE_PERMISSION, MAX_CLIENTS, clientFingerprint, evaluateExpiry } from './token-store.mjs'
+import { BOARD_CREATE_PERMISSION, CAD_UPLOAD_MAX_LIFETIME_MS, MAX_CLIENTS, clientFingerprint, evaluateExpiry } from './token-store.mjs'
 
 /**
  * The reader is deliberately forward-compatible.
@@ -28,6 +28,10 @@ const clientSchema = z.object({
 	tokenHash: z.string().regex(/^[a-f0-9]{64}$/),
 	rooms: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,80}$/)).min(1).max(50),
 	permissions: z.array(z.enum(['read', 'write', 'history', 'restore'])).min(1).max(4),
+	// Per-client capabilities beside `permissions`. Plain strings on purpose: an enum here would make a newer capability reject the whole file on an older reader.
+	// `.catch` as well: a malformed value (a typo, a different shape from a future version) disables this client's capabilities
+	// and nothing else, instead of failing the whole parse and locking every agent out.
+	capabilities: z.array(z.string().max(40)).max(8).optional().catch(undefined),
 }).passthrough()
 const tokenFileSchema = z.object({ clients: z.array(clientSchema).max(MAX_CLIENTS) }).passthrough()
 
@@ -100,6 +104,70 @@ export function authorizeApiToken(header: string | undefined, roomId: string, pe
 		const expiry = evaluateExpiry(client.expiresAt, now)
 		if (expiry === 'expired' || expiry === 'invalid') continue
 		return client.name
+	}
+	return null
+}
+
+/**
+ * Returns the client name when `header` is a valid, unexpired bearer for exactly `roomId` that holds BOTH the `write`
+ * permission and the named capability, otherwise null. A board-creating credential never carries a capability, and a
+ * capability without write access is refused here even if one was stored (for example after an access change).
+ *
+ * A capability credential must also carry a live expiry that is no more than CAD_UPLOAD_MAX_LIFETIME_MS away. One with no
+ * expiry, an unreadable one, or one set further out by hand is refused, so the short-life rule holds at the point of use
+ * and not only when the credential is minted.
+ */
+export function authorizeApiCapability(header: string | undefined, roomId: string, capability: string, now: number = Date.now()): string | null {
+	const match = /^Bearer ([A-Za-z0-9_-]{32,128})$/.exec(header ?? '')
+	if (!match) return null
+	const store = loadStore()
+	if (!store) return null
+	const digest = createHash('sha256').update(match[1]).digest()
+	for (const client of store.clients) {
+		const stored = Buffer.from(client.tokenHash, 'hex')
+		if (!timingSafeEqual(digest, stored)) continue
+		if (client.rooms.length !== 1 || client.rooms[0] !== roomId) continue
+		if (!client.permissions.includes('write') || !client.capabilities?.includes(capability)) continue
+		if (evaluateExpiry(client.expiresAt, now) !== 'active') continue
+		if (Date.parse(String(client.expiresAt)) - now > CAD_UPLOAD_MAX_LIFETIME_MS) continue
+		return client.name
+	}
+	return null
+}
+
+export interface ApiTokenDescription {
+	name: string
+	kind: 'board' | 'board-creator'
+	/** The permissions this credential holds on every board it reaches. */
+	permissions: ApiPermission[]
+	rooms: string[]
+	expiresAt?: string
+	accountPermissions: string[]
+}
+
+/**
+ * Describes a valid, unexpired bearer for the diagnostics route: its name, what it may do, which boards it reaches and when it expires.
+ * Never the hash, the fingerprint or anything that would help forge, rotate or identify the secret. Null for anything that would not authenticate.
+ */
+export function describeApiToken(header: string | undefined, now: number = Date.now()): ApiTokenDescription | null {
+	const match = /^Bearer ([A-Za-z0-9_-]{32,128})$/.exec(header ?? '')
+	if (!match) return null
+	const store = loadStore()
+	if (!store) return null
+	const digest = createHash('sha256').update(match[1]).digest()
+	const candidates: Array<{ client: StoredClient | StoredAccountClient; kind: 'board' | 'board-creator' }> = [
+		...store.clients.map((client) => ({ client, kind: 'board' as const })),
+		...store.accountClients.map((client) => ({ client, kind: 'board-creator' as const })),
+	]
+	for (const { client, kind } of candidates) {
+		if (!timingSafeEqual(digest, Buffer.from(client.tokenHash, 'hex'))) continue
+		const expiry = evaluateExpiry(client.expiresAt, now)
+		if (expiry === 'expired' || expiry === 'invalid') return null
+		return {
+			name: client.name, kind, permissions: [...client.permissions], rooms: [...client.rooms],
+			...(typeof client.expiresAt === 'string' ? { expiresAt: client.expiresAt } : {}),
+			accountPermissions: 'accountPermissions' in client && Array.isArray(client.accountPermissions) ? client.accountPermissions.filter((p): p is string => typeof p === 'string') : [],
+		}
 	}
 	return null
 }

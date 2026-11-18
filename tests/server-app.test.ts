@@ -7,6 +7,9 @@ import type { FastifyInstance } from 'fastify'
 import WebSocket from 'ws'
 import { afterEach, describe, expect, it } from 'vitest'
 import { buildApp, type BuildAppOptions } from '../server/app'
+import { b64Vecs, createShapeId, DrawShapeUtil, type TLDrawShape } from 'tldraw'
+import { networkRoomClient } from './helpers/network-room-client'
+import { until } from './helpers/room-client'
 
 const previousTokenFile = process.env.CANVAS_API_TOKENS_FILE
 const cleanupDirectories: string[] = []
@@ -60,6 +63,53 @@ async function registerOwner(app: FastifyInstance, login = 'Owner') {
 }
 
 function bearer(token: string) { return { authorization: `Bearer ${token}` } }
+
+it('syncs human edits to other editors and viewers over authenticated WebSockets and catches up after reconnect', async () => {
+	const { app } = await createApp()
+	const owner = await registerOwner(app)
+	expect((await app.inject({ method: 'POST', url: '/api/boards', headers: { cookie: owner.cookie }, payload: { id: 'multiplayer', name: 'Multiplayer' } })).statusCode).toBe(200)
+	const cookies: string[] = [owner.cookie]
+	for (const role of ['editor', 'viewer'] as const) {
+		const invite = await app.inject({ method: 'POST', url: '/api/invitations', headers: { cookie: owner.cookie }, payload: { boardId: 'multiplayer', role } })
+		const registered = await app.inject({ method: 'POST', url: '/api/auth/register', payload: { login: role, displayName: role, password: 'test-only strong password', invitationToken: invite.json().token } })
+		expect(registered.statusCode).toBe(200)
+		cookies.push(`canvas_session=${registered.cookies[0].value}`)
+	}
+	// Use the public action to obtain a schema-valid shape, then make all edits in client stores.
+	expect((await app.inject({ method: 'POST', url: '/api/rooms/multiplayer/actions', headers: { cookie: owner.cookie }, payload: { actions: [{ tool: 'create_shape', id: 'shape:seed', type: 'rectangle', text: 'Live drawing', x: 10, y: 20, width: 100, height: 100 }] } })).statusCode).toBe(200)
+	await app.listen({ port: 0, host: '127.0.0.1' })
+	const port = (app.server.address() as AddressInfo).port
+	const peers = cookies.map((cookie, index) => networkRoomClient(`ws://127.0.0.1:${port}/api/connect/multiplayer?sessionId=multiplayer-peer-${index}`, cookie))
+	const [writer, collaborator, viewer] = peers
+	try {
+		await until(() => peers.every((peer) => peer.state.loaded), 5000).catch((error) => { throw new Error(JSON.stringify(peers.map((peer) => ({ ...peer.state, status: peer.socket.connectionStatus }))), { cause: error }) })
+		expect(viewer.state.readonly).toBe(true)
+		const seed = writer.store.get(createShapeId('seed'))
+		if (!seed) throw new Error('Seed shape missing')
+		const drawingId = createShapeId('human-drawing')
+		const drawing: TLDrawShape = { ...seed, id: drawingId, type: 'draw', props: {
+			...DrawShapeUtil.prototype.getDefaultProps(),
+			segments: [{ type: 'free', path: b64Vecs.encodePoints([{ x: 0, y: 0, z: 0.5 }, { x: 30, y: 20, z: 0.5 }]) }],
+		} }
+		writer.store.put([drawing])
+		await until(() => peers.every((peer) => peer.store.has(drawingId)), 5000)
+		writer.store.put([{ ...drawing, props: { ...drawing.props, isComplete: true } }])
+		await until(() => viewer.store.get(drawingId)?.props.isComplete === true, 5000)
+		collaborator.store.put([{ ...drawing, x: 250 }])
+		await until(() => writer.store.get(drawingId)?.x === 250 && viewer.store.get(drawingId)?.x === 250, 5000)
+		viewer.disconnect()
+		await until(() => viewer.socket.connectionStatus === 'offline')
+		writer.store.put([{ ...drawing, x: 500 }])
+		await until(() => collaborator.store.get(drawingId)?.x === 500, 5000)
+		viewer.reconnect()
+		await until(() => viewer.store.get(drawingId)?.x === 500, 5000)
+		viewer.store.put([{ ...drawing, x: 999 }])
+		await until(() => viewer.store.get(drawingId)?.x === 500, 5000)
+		collaborator.store.remove([drawingId])
+		await until(() => peers.every((peer) => !peer.store.has(drawingId)), 5000)
+		expect(peers.map((peer) => peer.state.error)).toEqual(['', '', ''])
+	} finally { for (const peer of peers) peer.close() }
+}, 20000)
 
 async function openSocket(app: FastifyInstance, path: string, headers: Record<string, string>) {
 	return new Promise<{ state: 'open' } | { state: 'closed'; code: number; reason: string }>((resolve, reject) => {

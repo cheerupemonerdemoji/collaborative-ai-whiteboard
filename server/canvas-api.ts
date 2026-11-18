@@ -1,8 +1,11 @@
 import { getIndexAbove } from '@tldraw/utils'
-import { toRichText, type TLBinding, type TLPage, type TLRecord, type TLShape, type TLShapeId } from '@tldraw/tlschema'
+import { toRichText, type TLBinding, type TLPage, type TLPageId, type TLRecord, type TLShape, type TLShapeId } from '@tldraw/tlschema'
 import type { TLSocketRoom } from '@tldraw/sync-core'
 import { z } from 'zod'
 import { canvasActionSchema, type CanvasAction, type CanvasObject } from '../shared/ai'
+import { CAD_REVIEW_SHAPE_TYPE } from '../shared/cad-model'
+import { CHART_SHAPE_TYPE, parseChartDefinition } from '../shared/chart'
+import { DEFAULT_IMAGE_WIDTH, LINKABLE_SHAPE_TYPES, MEDIA_TOOLS, mediaActionSchema, type MediaAction } from '../shared/media-actions'
 import {
 	ARCHIVED_STATUS,
 	defaultStatusFor,
@@ -16,6 +19,7 @@ import {
 	type SemanticContextRequest,
 } from '../shared/entities'
 import { schema } from './rooms'
+import { assessContent, contentDigest, contentOf, legacyPreview } from './shape-content'
 import { describeLayout, layoutOf, LayoutQueryError, parseLayoutQuery, rerouteManagedArrows, translateShape } from './layout-service'
 import { ALIGNMENT_TOLERANCE, LAYOUT_GAP, LAYOUT_TOOLS, layoutActionSchema, type LayoutAction, type LayoutTool, type Measurement } from '../shared/layout'
 import { ancestorsOf, edgePoint, rectsCloserThan, type PageLayout, type ShapeLayout } from '../shared/layout-geometry'
@@ -28,12 +32,17 @@ const SEMANTIC_TOOLS = new Set<SemanticAction['tool']>([
 	'create_entity', 'update_entity', 'link_entities', 'unlink_entities',
 	'record_experiment_result', 'attach_evidence', 'update_status',
 ])
-function isSemanticAction(action: CanvasAction | SemanticAction | LayoutAction): action is SemanticAction {
+type AnyAction = CanvasAction | SemanticAction | LayoutAction | MediaAction
+function isSemanticAction(action: AnyAction): action is SemanticAction {
 	return SEMANTIC_TOOLS.has(action.tool as SemanticAction['tool'])
 }
 const LAYOUT_TOOL_SET: ReadonlySet<string> = new Set(LAYOUT_TOOLS)
-function isLayoutAction(action: CanvasAction | SemanticAction | LayoutAction): action is LayoutAction {
+function isLayoutAction(action: AnyAction): action is LayoutAction {
 	return LAYOUT_TOOL_SET.has(action.tool)
+}
+const MEDIA_TOOL_SET: ReadonlySet<string> = new Set(MEDIA_TOOLS)
+function isMediaAction(action: AnyAction): action is MediaAction {
+	return MEDIA_TOOL_SET.has(action.tool)
 }
 
 /**
@@ -41,7 +50,7 @@ function isLayoutAction(action: CanvasAction | SemanticAction | LayoutAction): a
  * unmodified by this feature. See docs/reviews/2026-09-22-chibi-entity-design-deepseek.md #3:
  * a test pins canvasActionSchema's exact shape so this file can never silently change it.
  */
-const combinedActionSchema = z.union([canvasActionSchema, semanticActionSchema, layoutActionSchema])
+const combinedActionSchema = z.union([canvasActionSchema, semanticActionSchema, layoutActionSchema, mediaActionSchema])
 const combinedActionsSchema = z.array(combinedActionSchema).min(1).max(30)
 
 export const actionRequestSchema = z.object({
@@ -50,8 +59,14 @@ export const actionRequestSchema = z.object({
 	actions: combinedActionsSchema,
 }).strict()
 
+export const createPageRequestSchema = z.object({
+	id: z.string().regex(/^page:[A-Za-z0-9_-]{1,80}$/),
+	name: z.string().trim().min(1).max(100),
+}).strict()
+
 export class CanvasApiError extends Error {
-	constructor(message: string, readonly statusCode = 422) { super(message) }
+	/** `code` is machine-readable and `details` is structured, so a client can act on a refusal without parsing the message. */
+	constructor(message: string, readonly statusCode = 422, readonly code?: string, readonly details?: Record<string, unknown>) { super(message) }
 }
 
 export interface SemanticActor {
@@ -67,34 +82,56 @@ function selectedPage(items: TLRecord[], requested?: string) {
 	if (!page) throw new CanvasApiError('Page not found', 404)
 	return page
 }
-function plainText(value: unknown): string {
-	const text: string[] = []
-	function visit(node: unknown) {
-		if (!node || typeof node !== 'object') return
-		const item = node as Record<string, unknown>
-		if (item.type === 'text' && typeof item.text === 'string') text.push(item.text)
-		if (Array.isArray(item.content)) item.content.forEach(visit)
-	}
-	visit(value)
-	return text.join(' ').slice(0, 500)
+/** The record revision: the document clock at which each record last changed. A room transaction does not expose it, so it is read from the snapshot just before one begins (no await can interleave). */
+export function revisionsOf<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>): Map<string, number> {
+	return new Map(room.getCurrentSnapshot().documents.map((item) => [(item.state as { id: string }).id, item.lastChangedClock]))
 }
-function objectFromShape(shape: TLShape): CanvasObject {
+function objectFromShape(shape: TLShape, revision?: number): CanvasObject {
 	const props = shape.props as unknown as Record<string, unknown>
 	const start = props.start as { x: number; y: number } | undefined
 	const end = props.end as { x: number; y: number } | undefined
 	const width = typeof props.w === 'number' ? Math.abs(props.w) : start && end ? Math.abs(end.x - start.x) : 0
 	const height = typeof props.h === 'number' ? Math.abs(props.h) : start && end ? Math.abs(end.y - start.y) : 0
 	const connection = shape.meta.canvasApiConnection as { fromId?: string; toId?: string } | undefined
-	return { id: shape.id, type: shape.type === 'geo' ? String(props.geo) : shape.type, text: plainText(props.richText), x: shape.x, y: shape.y, width, height,
+	let chart
+	if (shape.type === CHART_SHAPE_TYPE && typeof props.definitionJson === 'string') {
+		try { chart = parseChartDefinition(props.definitionJson) } catch { /* A malformed old record should not make the board unreadable. */ }
+	}
+	// `text` stays the legacy preview (text runs joined by a space, cut at 500) so existing clients are unaffected, and these fields say plainly that it is only a preview.
+	const loss = props.richText === undefined ? null : assessContent(props.richText)
+	return { id: shape.id, type: shape.type === 'geo' ? String(props.geo) : shape.type, text: chart?.title ?? legacyPreview(props.richText), x: shape.x, y: shape.y, width, height,
+		...(chart ? { chart } : {}),
 		...(start && end ? { startX: shape.x + start.x, startY: shape.y + start.y, endX: shape.x + end.x, endY: shape.y + end.y } : {}),
 		...(connection?.fromId && connection?.toId ? { fromId: connection.fromId, toId: connection.toId } : {}),
+		...(revision === undefined ? {} : { revision }),
+		...(loss ? { textTruncated: loss.textTruncated, originalLength: loss.originalLength, contentLossy: loss.contentLossy, lossReasons: loss.lossReasons } : {}),
 	}
 }
 export function readRoomCanvas<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, requestedPageId?: string) {
 	const snapshot = room.getCurrentSnapshot()
 	const items = snapshot.documents.map((item) => item.state) as TLRecord[]
+	const revisions = new Map(snapshot.documents.map((item) => [(item.state as { id: string }).id, item.lastChangedClock]))
 	const page = selectedPage(items, requestedPageId)
-	return { pageId: page.id, pages: pages(items).map(({ id, name }) => ({ id, name })), clock: snapshot.documentClock, objects: shapes(items).filter((shape) => shape.parentId === page.id).map(objectFromShape) }
+	return { pageId: page.id, pages: pages(items).map(({ id, name }) => ({ id, name })), clock: snapshot.documentClock, objects: shapes(items).filter((shape) => shape.parentId === page.id).map((shape) => objectFromShape(shape, revisions.get(shape.id))) }
+}
+
+/** Client-chosen IDs make a retry after a lost response safe: the same ID and name return the existing page. */
+export function createRoomPage<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, raw: unknown) {
+	const request = createPageRequestSchema.parse(raw)
+	const { result, documentClock } = room.storage.transaction((txn) => {
+		const existing = txn.get(request.id)
+		if (existing) {
+			if (existing.typeName !== 'page' || existing.name !== request.name) throw new CanvasApiError('Page ID already exists with different content', 409, 'page_id_conflict')
+			return { pageId: existing.id, name: existing.name, created: false }
+		}
+		const available = pages([...txn.values()])
+		if (available.length >= 40) throw new CanvasApiError('Board has reached the 40-page limit', 422, 'page_limit')
+		const page: TLPage = { id: request.id as TLPageId, typeName: 'page', name: request.name, index: getIndexAbove(available.at(-1)?.index), meta: {} }
+		schema.types.page.validate(page)
+		txn.set(page.id, page)
+		return { pageId: page.id, name: page.name, created: true }
+	})
+	return { ...result, clock: documentClock }
 }
 
 /**
@@ -114,6 +151,63 @@ export function readRoomLayout<SessionMeta>(room: TLSocketRoom<TLRecord, Session
 		if (error instanceof LayoutQueryError) throw new CanvasApiError(error.message, error.statusCode)
 		throw error
 	}
+}
+
+/** A text record larger than this is refused by the lossless read rather than streamed. */
+const MAX_CONTENT_BYTES = 1_000_000
+
+/**
+ * The complete, authoritative content of ONE shape: its full rich text (marks and paragraphs intact), its plain text, its exact length, its
+ * revision, and the digest an update can present to prove it was made against this full content. Nothing else on the board is returned.
+ */
+export function readShapeContent<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, shapeId: string) {
+	const snapshot = room.getCurrentSnapshot()
+	const document = snapshot.documents.find((item) => (item.state as { id: string }).id === shapeId)
+	if (!document || (document.state as { typeName?: string }).typeName !== 'shape') throw new CanvasApiError('Shape not found', 404)
+	const shape = document.state as unknown as TLShape
+	const content = contentOf(shape)
+	if (!content) throw new CanvasApiError(`Shape ${shapeId} has no text content this API reads`, 422, 'unsupported_shape_type')
+	if (Buffer.byteLength(JSON.stringify(content.richText), 'utf8') > MAX_CONTENT_BYTES) throw new CanvasApiError('This text is too large to return in one response', 413, 'content_too_large')
+	return {
+		id: shape.id, type: shape.type, parentId: shape.parentId, representation: 'lossless' as const,
+		text: content.text, paragraphs: content.paragraphs, originalLength: content.originalLength, richText: content.richText,
+		revision: document.lastChangedClock, contentDigest: content.contentDigest, clock: snapshot.documentClock,
+	}
+}
+
+type UpdateTextAction = Extract<CanvasAction, { tool: 'update_text' }>
+
+/**
+ * The invariant: a lossy preview may never silently authorize replacing the authoritative value.
+ *
+ * (1) If the caller says which revision it read, that must still be the record's revision; this is checked first and no acknowledgement bypasses it.
+ * (2) If the current content is something a canvas read could not show exactly (truncated, or paragraph/formatting structure omitted), the
+ *     caller must EITHER prove a lossless read (`expectedContentDigest`, which only the lossless shape read returns) OR explicitly accept the
+ *     loss (`overwriteTruncatedSource`). In both cases `expectedRevision` is required.
+ */
+function guardTextReplacement(shape: TLShape, action: UpdateTextAction, revision: number | undefined): void {
+	const richText = (shape.props as unknown as { richText?: unknown }).richText
+	if (action.expectedRevision !== undefined && revision !== undefined && action.expectedRevision !== revision) {
+		throw new CanvasApiError(`${shape.id} changed after revision ${action.expectedRevision} (it is now at ${revision}); read it again and retry`, 409, 'revision_conflict', { id: shape.id, expectedRevision: action.expectedRevision, currentRevision: revision })
+	}
+	const loss = assessContent(richText)
+	if (!loss.contentLossy) return
+	const acknowledged = action.overwriteTruncatedSource === true
+	if (acknowledged || action.expectedContentDigest !== undefined) {
+		if (action.expectedRevision === undefined) {
+			throw new CanvasApiError(`Replacing the text of ${shape.id} needs expectedRevision: an acknowledgement or a content digest does not replace concurrency protection`, 422, 'expected_revision_required', { id: shape.id, currentRevision: revision })
+		}
+		if (!acknowledged && action.expectedContentDigest !== contentDigest(richText)) {
+			throw new CanvasApiError(`The content digest does not match the current content of ${shape.id}; fetch the full shape again`, 409, 'content_digest_mismatch', { id: shape.id, currentRevision: revision })
+		}
+		return
+	}
+	const code = loss.textTruncated ? 'source_truncated' : 'source_lossy'
+	throw new CanvasApiError(
+		`${shape.id} holds ${loss.originalLength} characters that a canvas read could not show exactly (${loss.lossReasons.join(', ')}). Replacing it from that preview would destroy the rest. ` +
+		'Fetch the full shape (GET /api/rooms/BOARD_ID/shapes/SHAPE_ID) and send expectedRevision with expectedContentDigest, or send expectedRevision with overwriteTruncatedSource: true to replace the whole value on purpose.',
+		409, code, { id: shape.id, reasons: loss.lossReasons, originalLength: loss.originalLength, currentRevision: revision },
+	)
 }
 
 /* ------------------------------------------------------------ semantic layer -- */
@@ -278,9 +372,17 @@ export function readRoomSemantics<SessionMeta>(room: TLSocketRoom<TLRecord, Sess
 	return payload
 }
 
+/** What `create_image` needs from the server: the board it is on, and a checked read of a stored image's real type and size. */
+export interface ImageSource {
+	boardId: string
+	read(assetId: string): { mimeType: string; width: number; height: number; bytes: number } | null
+}
+
 export interface ApplyOptions {
 	/** Browser-reported sizes for text and notes, so layout actions place against the best geometry known. */
 	measurements?: ReadonlyMap<string, Measurement>
+	/** Without it `create_image` is refused: an image can only be placed from a source the server vouches for. */
+	images?: ImageSource
 }
 
 /** What this module needs from the room transaction, so the layout handlers can be written without the library's generics. */
@@ -312,6 +414,8 @@ export interface LayoutActionResult {
 
 export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, SessionMeta>, raw: unknown, actor: SemanticActor, isAssetInBoard?: (uploadId: string) => boolean, options: ApplyOptions = {}) {
 	const request = actionRequestSchema.parse(raw)
+	// Record revisions are read before the transaction opens: the room is synchronous, so nothing can change between this read and the guard below.
+	const revisions = request.actions.some((action) => action.tool === 'update_text' || action.tool === 'update_chart') ? revisionsOf(room) : null
 	const { result, documentClock } = room.storage.transaction((txn) => {
 		if (request.expectedClock !== undefined && txn.getClock() !== request.expectedClock) throw new CanvasApiError('Canvas changed; read it again and retry', 409)
 		const items = [...txn.values()]
@@ -323,9 +427,43 @@ export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, Sessi
 		const now = Date.now()
 		const run: LayoutRun = { affected: new Set(), touched: new Set(), results: [] }
 		for (const [position, action] of request.actions.entries()) {
+			if (isMediaAction(action)) {
+				if (action.tool === 'create_image') {
+					if (txn.get(action.id)) throw new CanvasApiError(`Object ID already exists: ${action.id}`, 409)
+					// Only an image uploaded to THIS board. The same rule as every other asset, so another board's file is never reachable.
+					if (!isAssetInBoard?.(action.assetId)) throw new CanvasApiError(`The image ${action.assetId} was not uploaded to this board`, 404)
+					const info = options.images?.read(action.assetId)
+					if (!options.images || !info) throw new CanvasApiError('That image is missing from storage or is not a valid image', 422)
+					const width = action.width ?? Math.min(info.width, DEFAULT_IMAGE_WIDTH)
+					const height = Math.max(1, Math.round((width * info.height) / info.width))
+					// One asset record per stored file, shared by every picture of it. Its source is the board-scoped read route.
+					const assetRecordId = `asset:${action.assetId.replace(/[^A-Za-z0-9_-]/g, '_')}`
+					if (!txn.get(assetRecordId)) {
+						const asset = { id: assetRecordId, typeName: 'asset', type: 'image', meta: {}, props: { w: info.width, h: info.height, name: action.assetId, isAnimated: info.mimeType === 'image/gif', mimeType: info.mimeType, src: `/api/boards/${encodeURIComponent(options.images.boardId)}/assets/${action.assetId}`, fileSize: info.bytes } }
+						schema.types.asset.validate(asset)
+						txn.set(assetRecordId, asset as unknown as TLRecord)
+					}
+					topIndex = getIndexAbove(topIndex)
+					const created = { id: action.id as TLShapeId, typeName: 'shape', type: 'image', x: action.x, y: action.y, rotation: 0, index: topIndex, parentId: page.id, isLocked: false, opacity: 1, meta: {},
+						props: { w: width, h: height, playing: true, url: action.url ?? '', assetId: assetRecordId, crop: null, flipX: false, flipY: false, altText: action.altText ?? '' } } as unknown as TLShape
+					schema.types.shape.validate(created)
+					txn.set(created.id, created)
+					current.set(created.id, created)
+					continue
+				}
+				// set_link
+				const target = current.get(action.id)
+				if (!target) throw new CanvasApiError(`Unknown object on this page: ${action.id}`, 404)
+				if (!(LINKABLE_SHAPE_TYPES as readonly string[]).includes(target.type)) throw new CanvasApiError(`Shape ${target.id} cannot hold a link. Links work on rectangles, ellipses, notes and images; a text box cannot hold one.`, 422)
+				const linked = { ...target, props: { ...target.props, url: action.url ?? '' } } as TLShape
+				schema.types.shape.validate(linked, target)
+				txn.set(linked.id, linked)
+				current.set(linked.id, linked)
+				continue
+			}
 			if (isSemanticAction(action)) { applySemanticAction(txn, entityCount, action, actor, now, isAssetInBoard); continue }
 			if (isLayoutAction(action)) { applyLayoutAction(txn, page, action, position, current, run, options.measurements); continue }
-			if (action.tool === 'create_shape' || action.tool === 'create_text' || action.tool === 'create_arrow' || action.tool === 'connect_shapes') {
+			if (action.tool === 'create_shape' || action.tool === 'create_chart' || action.tool === 'create_text' || action.tool === 'create_arrow' || action.tool === 'connect_shapes') {
 				if (txn.get(action.id)) throw new CanvasApiError(`Object ID already exists: ${action.id}`, 409)
 				topIndex = getIndexAbove(topIndex)
 				// An arrow drawn between two shapes is aimed at their real bounds (estimated for text no browser has measured).
@@ -347,6 +485,10 @@ export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, Sessi
 			const existing = current.get(action.id)
 			if (!existing) throw new CanvasApiError(`Unknown object on this page: ${action.id}`, 404)
 			if (action.tool === 'delete_shape') {
+				// A CAD card stands for a model people review and approve. Removing it is a human decision, never an agent's.
+				// That includes a frame (or any parent) holding one: removing the parent would orphan the card.
+				const holdsCadCard = (parentId: string): boolean => shapes(items).some((shape) => shape.parentId === parentId && ((shape.type as string) === CAD_REVIEW_SHAPE_TYPE || holdsCadCard(shape.id)))
+				if ((existing.type as string) === CAD_REVIEW_SHAPE_TYPE || holdsCadCard(existing.id)) throw new CanvasApiError(`${existing.id} is, or contains, a CAD review card. AI clients cannot delete CAD cards or change the models they show; ask a person to do it.`, 403, 'cad_card_protected')
 				txn.delete(existing.id)
 				current.delete(existing.id)
 				// A binding that points at (or from) a deleted shape would dangle, so it goes with it.
@@ -358,11 +500,18 @@ export function applyRoomActions<SessionMeta>(room: TLSocketRoom<TLRecord, Sessi
 			}
 			let updated: TLShape
 			if (action.tool === 'move_shape') { updated = { ...existing, x: action.x, y: action.y }; run.affected.add(existing.id) }
+			else if (action.tool === 'update_chart') {
+				if (existing.type !== CHART_SHAPE_TYPE) throw new CanvasApiError(`Shape ${existing.id} is not a chart`)
+				if (revisions?.get(existing.id) !== action.expectedRevision) throw new CanvasApiError('Chart changed since it was read', 409, 'revision_conflict')
+				updated = { ...existing, props: { ...existing.props, definitionJson: JSON.stringify(action.chart) } } as TLShape
+			}
 			else if (action.tool === 'update_text') {
 				if (!['geo', 'text', 'note'].includes(existing.type)) throw new CanvasApiError(`Shape ${existing.id} does not support text`)
+				guardTextReplacement(existing, action, revisions?.get(existing.id))
 				updated = { ...existing, props: { ...existing.props, richText: toRichText(action.text) } } as TLShape
 			} else {
-				if (!['geo', 'frame'].includes(existing.type)) throw new CanvasApiError(`Shape ${existing.id} cannot be resized`)
+				if (!['geo', 'frame', CHART_SHAPE_TYPE].includes(existing.type)) throw new CanvasApiError(`Shape ${existing.id} cannot be resized`)
+				if (existing.type === CHART_SHAPE_TYPE && (action.width < 300 || action.height < 240)) throw new CanvasApiError('Charts must be at least 300 by 240')
 				updated = { ...existing, props: { ...existing.props, w: action.width, h: action.height } } as TLShape
 				run.affected.add(existing.id)
 			}
@@ -383,6 +532,9 @@ function newShape(action: CanvasAction, pageId: TLPage['id'], index: TLShape['in
 	if (action.tool === 'create_shape') {
 		type = 'geo'; x = action.x; y = action.y
 		props = { geo: action.type, w: action.width, h: action.height, color: 'black', labelColor: 'black', fill: 'none', dash: 'draw', size: 'm', font: 'draw', align: 'middle', verticalAlign: 'middle', richText: toRichText(action.text), url: '', growY: 0, scale: 1, flipX: false, flipY: false }
+	} else if (action.tool === 'create_chart') {
+		type = CHART_SHAPE_TYPE; x = action.x; y = action.y
+		props = { w: action.width, h: action.height, definitionJson: JSON.stringify(action.chart) }
 	} else if (action.tool === 'create_text') {
 		type = 'text'; x = action.x; y = action.y
 		// With a width the text wraps at it (deterministic); without one it is one unwrapped line per paragraph, which is how

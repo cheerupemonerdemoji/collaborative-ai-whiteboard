@@ -14,6 +14,26 @@ afterEach(() => { rooms.forEach((room) => room.close()); rooms.length = 0 })
 function room() { const instance = new TLSocketRoom<TLRecord, void>({ schema }); rooms.push(instance); return instance }
 
 describe('external canvas actions', () => {
+	it('creates a readable chart and requires its revision for changes', () => {
+		const instance = room()
+		const chart = { kind: 'bar' as const, title: 'Run outcomes', source: 'results/many_seed.json', data: [{ label: 'stalled', value: 57 }, { label: 'slow', value: 3 }] }
+		applyRoomActions(instance, { actions: [{ tool: 'create_chart', id: 'shape:chart', chart, x: 25, y: 40, width: 720, height: 500 }] })
+		const created = readRoomCanvas(instance).objects[0]
+		expect(created).toMatchObject({ id: 'shape:chart', type: 'data-chart', text: 'Run outcomes', x: 25, y: 40, width: 720, height: 500, chart })
+		const next = { ...chart, title: 'Updated outcomes' }
+		applyRoomActions(instance, { actions: [{ tool: 'update_chart', id: 'shape:chart', chart: next, expectedRevision: created.revision! }] })
+		expect(readRoomCanvas(instance).objects[0].chart).toEqual(next)
+		expect(() => applyRoomActions(instance, { actions: [{ tool: 'update_chart', id: 'shape:chart', chart, expectedRevision: created.revision! }] })).toThrow(CanvasApiError)
+	})
+	it('rejects unsafe or incomplete chart data atomically', () => {
+		const instance = room()
+		expect(() => applyRoomActions(instance, { actions: [
+			{ tool: 'create_shape', id: 'shape:before-chart', type: 'rectangle', text: 'Before', x: 0, y: 0, width: 100, height: 100 },
+			{ tool: 'create_chart', id: 'shape:invalid-chart', x: 200, y: 0, width: 720, height: 500,
+				chart: { kind: 'scatter', title: 'Invalid', source: 'test', data: [{ label: 'A', value: 1 }] } },
+		] })).toThrow()
+		expect(readRoomCanvas(instance).objects).toEqual([])
+	})
 	it('creates native circles and arrows in one transaction and exposes the updated canvas', () => {
 		const instance = room()
 		const before = readRoomCanvas(instance)

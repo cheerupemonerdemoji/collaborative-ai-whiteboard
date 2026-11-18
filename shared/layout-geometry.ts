@@ -16,7 +16,7 @@ import {
  * where it can be exact. Pure and dependency-free so the server, the tests and a future human "Tidy" command share it.
  *
  * What is exact: position (x, y, rotation and every parent transform) and the stored size of geo, frame, image,
- * video, bookmark, embed, draw and line shapes. What is not: the size of text and note labels, which tldraw measures
+ * video, bookmark, embed, CAD review, draw and line shapes. What is not: the size of text and note labels, which tldraw measures
  * in the browser. Those use a reported `measured` size when its fingerprint still matches the content, and an
  * `estimated` (deliberately large, `unverified`) size otherwise.
  */
@@ -177,7 +177,9 @@ interface Sized {
 	unknownType?: boolean
 }
 
-const STORED_SIZE_TYPES = new Set(['frame', 'image', 'video', 'bookmark', 'embed'])
+// Keep custom stored-size types in sync with their shape schemas without pulling
+// their tldraw and Zod dependencies into this pure geometry core.
+const STORED_SIZE_TYPES = new Set(['frame', 'image', 'video', 'bookmark', 'embed', 'cad-review', 'data-chart'])
 
 function declared(rect: Rect, extra: Partial<Sized> = {}): Sized {
 	return { rect, source: 'declared', verification: 'verified', ...extra }
@@ -224,6 +226,12 @@ function sizeOf(shape: LayoutShapeRecord, measurements: ReadonlyMap<string, Meas
 		const scale = num(p.scale, 1)
 		const raw = p.points && typeof p.points === 'object' ? Object.values(p.points as Record<string, { x?: number; y?: number }>) : []
 		return boxOfPoints(raw.map((point) => ({ x: num(point.x), y: num(point.y) })), scale)
+	}
+	// Other custom BaseBox shapes may also store their size as w/h. Report that
+	// declared box instead of a misleading zero-size point, but keep it
+	// unverified because the server does not know how the custom shape renders.
+	if (typeof p.w === 'number' && Number.isFinite(p.w) && p.w > 0 && typeof p.h === 'number' && Number.isFinite(p.h) && p.h > 0) {
+		return { rect: { x: 0, y: 0, w: p.w, h: p.h }, source: 'declared', verification: 'unverified', unknownType: true }
 	}
 	return null
 }

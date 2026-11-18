@@ -26,6 +26,17 @@ export const MAX_ACCOUNT_CLIENTS: number
 /** The one account-level capability: create new boards owned by the credential's `ownerUserId`. */
 export const BOARD_CREATE_PERMISSION: 'board:create'
 
+/** Per-client capability beside `permissions`: validated CAD uploads and one CAD model entry, for one board. */
+export const CAD_UPLOAD_CAPABILITY: 'cad-upload'
+export const CLIENT_CAPABILITIES: readonly string[]
+
+/** The longest a cad-upload credential may live (policy, in days), checked when it is minted, rotated and used. */
+export const CAD_UPLOAD_MAX_LIFETIME_DAYS: number
+/** Extra time the checks allow for a requester's clock differing from the server's (one hour). */
+export const CAD_UPLOAD_CLOCK_ALLOWANCE_MS: number
+/** What the checks compare against: the policy in milliseconds plus the clock allowance. */
+export const CAD_UPLOAD_MAX_LIFETIME_MS: number
+
 /** Access-mode shorthands shared by the CLI and the HTTP routes. */
 export const ACCESS_MODES: Readonly<Record<AccessMode, readonly Permission[]>>
 
@@ -58,6 +69,8 @@ export interface ClientSummary {
 	name: string
 	rooms: string[]
 	permissions: Permission[]
+	/** Present only on a client that holds a capability (for example `cad-upload`). */
+	capabilities?: string[]
 }
 
 export type TokenStoreErrorCode =
@@ -67,6 +80,7 @@ export type TokenStoreErrorCode =
 	| 'invalid-rooms'
 	| 'invalid-access'
 	| 'invalid-expiry'
+	| 'invalid-capabilities'
 	| 'invalid-display-name'
 	| 'invalid-creator'
 	| 'store-full'
@@ -77,6 +91,7 @@ export type TokenStoreErrorCode =
 	| 'expired'
 	| 'room-limit'
 	| 'rollback-failed'
+	| 'restore-not-acknowledged'
 
 /**
  * Carries a stable machine-readable `code` so HTTP routes can map failures to
@@ -164,6 +179,8 @@ export interface CreateClientRequest {
 	displayName?: string
 	/** Optional id of the person who created the client, `[A-Za-z0-9:_.-]{1,128}`. */
 	createdByUserId?: string
+	/** Optional capabilities from CLIENT_CAPABILITIES. `cad-upload` needs write access, exactly one board, and an expiry of at most CAD_UPLOAD_MAX_LIFETIME_DAYS. */
+	capabilities?: string[]
 	/** The clock, for tests. Defaults to the current time. */
 	now?: Date
 }
@@ -174,6 +191,8 @@ export interface CreateClientResult {
 	name: string
 	rooms: string[]
 	permissions: Permission[]
+	/** Present only when a capability was granted. */
+	capabilities?: string[]
 	/** Fingerprint of the new credential (see `clientFingerprint`). */
 	fingerprint: string
 	/** When the client was created (ISO 8601, UTC). Stamped on every new client. */
@@ -266,6 +285,10 @@ export interface RotateClientRequest extends ClientTarget {
 	name: string
 	/** Replaces the client's expiry. Required when the current one has passed or is unreadable. */
 	expiresAt?: string | Date
+	/** Changes the access in the same locked mutation that replaces the bearer. Omit to keep the access exactly as it is. */
+	access?: AccessMode
+	/** Required to ADD `restore` to a client that did not hold it; history and write never imply it. */
+	acknowledgeRestore?: boolean
 	/** The clock, for tests. Defaults to the current time. */
 	now?: Date
 }
@@ -276,6 +299,12 @@ export interface RotateClientResult {
 	name: string
 	rooms: string[]
 	permissions: Permission[]
+	/** Present only when the client holds a capability. */
+	capabilities?: string[]
+	/** Present only when this rotation took a capability away because it removed the write access the capability needs. */
+	droppedCapabilities?: string[]
+	/** The permissions the client held before this rotation, so a change can be audited exactly. */
+	previousPermissions: Permission[]
 	/** Fingerprint of the new credential. */
 	fingerprint: string
 	createdAt?: string
@@ -302,6 +331,7 @@ export interface ClientDetail extends ClientSummary {
 	rotatedAt?: string
 	/** Present only on board-creating credentials. */
 	accountPermissions?: string[]
+	capabilities?: string[]
 	ownerUserId?: string
 	/** `clientFingerprint` of the stored credential, for addressing this exact record. */
 	fingerprint: string

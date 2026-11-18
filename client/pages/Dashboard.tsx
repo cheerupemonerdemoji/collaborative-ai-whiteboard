@@ -11,6 +11,8 @@ export interface BoardSummary {
 	name: string
 	ownerUserId: string
 	role: BoardRole
+	/** `site-owner` when the caller reaches this board only through the administrator override. */
+	access?: 'membership' | 'site-owner'
 	createdAt: number | string
 	updatedAt: number | string
 	deletedAt?: number | string | null
@@ -35,6 +37,7 @@ export function Dashboard() {
 	const [name, setName] = useState('')
 	const [creating, setCreating] = useState(false)
 	const [includeDeleted, setIncludeDeleted] = useState(false)
+	const [showAll, setShowAll] = useState(false)
 	const [joinOpen, setJoinOpen] = useState(false)
 	const [joinValue, setJoinValue] = useState('')
 	const [joining, setJoining] = useState(false)
@@ -50,7 +53,10 @@ export function Dashboard() {
 		setLoading(true)
 		setError(null)
 		try {
-			const query = includeDeletedFlag ? '?includeDeleted=true' : ''
+			const params = new URLSearchParams()
+			if (includeDeletedFlag) params.set('includeDeleted', 'true')
+			if (showAll) params.set('scope', 'all')
+			const query = params.size ? `?${params}` : ''
 			const result = await apiRequest<{ boards: BoardSummary[] }>(`/api/boards${query}`)
 			setBoards(result.boards)
 		} catch (caught) {
@@ -58,7 +64,7 @@ export function Dashboard() {
 		} finally {
 			setLoading(false)
 		}
-	}, [includeDeleted])
+	}, [includeDeleted, showAll])
 
 	useEffect(() => {
 		void loadBoards()
@@ -194,6 +200,7 @@ export function Dashboard() {
 			<div className="aw-dashboard-tools">
 				<button onClick={() => { setJoinOpen((open) => !open); setJoinError(null) }}>Join whiteboard</button>
 				<label className="aw-show-deleted"><input type="checkbox" checked={includeDeleted} onChange={toggleDeleted} /> Show deleted</label>
+				{user?.isAdmin ? <label className="aw-show-deleted"><input type="checkbox" checked={showAll} onChange={() => setShowAll((value) => !value)} /> All boards (site owner)</label> : null}
 			</div>
 			{joinOpen ? <form className="aw-join-form" onSubmit={(event) => void joinBoard(event)}>
 				<label><span>Invitation token or link</span><input value={joinValue} onChange={(event) => setJoinValue(event.target.value)} placeholder="Paste a token or a full invite link" autoFocus maxLength={512} /></label>
@@ -219,7 +226,7 @@ export function Dashboard() {
 						<button onClick={() => setDeleteConfirmId(null)}>Cancel</button>
 						<button className="aw-danger-button" disabled={deleting} onClick={() => void deleteBoard(board.id)}>{deleting ? 'Deleting…' : 'Yes, delete'}</button>
 					</div> : null}
-					<footer><span className={`aw-role aw-role-${board.role}`}>{board.role}</span>
+					<footer><span className={`aw-role aw-role-${board.role}`}>{board.access === 'site-owner' ? 'site owner' : board.role}</span>
 						<span className="aw-board-actions">
 							{board.deletedAt
 								? board.role === 'owner' ? <button disabled={restoring} onClick={() => void restoreBoard(board.id)}>{restoring ? 'Restoring…' : 'Restore'}</button> : null

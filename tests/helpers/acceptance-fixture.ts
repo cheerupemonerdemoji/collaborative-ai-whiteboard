@@ -13,7 +13,7 @@
  * does not talk to `whiteboard.example.com` or any other real host: proving the real
  * public edge (Cloudflare Tunnel routing, real HTTPS cookies, the real browser) still requires
  * the one-time manual/operator-assisted run described in
- * `docs/deployments/2026-09-28-acceptance-fixture.md`.
+ * `the acceptance-fixture design note`.
  *
  * Production safety: this module never accepts a data directory from a caller. It always mints
  * its own with `mkdtempSync(join(tmpdir(), ...))`, validates the result with
@@ -43,6 +43,7 @@ const ENV_KEYS_TO_ISOLATE = [
 	'CANVAS_CLIENT_DIR',
 	'CANVAS_API_TOKENS_FILE',
 	'CANVAS_ALLOW_OPEN_REGISTRATION',
+	'CANVAS_TELEMETRY_SOURCES',
 ] as const
 
 /**
@@ -156,6 +157,7 @@ function makeIdentity(app: FastifyInstance, role: FixtureRole, boardId: string, 
 export interface AcceptanceFixtureOptions {
 	boardId?: string
 	rateLimits?: BuildAppOptions['rateLimits']
+	telemetry?: BuildAppOptions['telemetry']
 }
 
 export interface AcceptanceFixture {
@@ -193,6 +195,7 @@ export async function createAcceptanceFixture(options: AcceptanceFixtureOptions 
 			serveClient: false,
 			logger: false,
 			rateLimits: options.rateLimits,
+			telemetry: options.telemetry,
 		})
 		patchInjectForOrigin(app)
 

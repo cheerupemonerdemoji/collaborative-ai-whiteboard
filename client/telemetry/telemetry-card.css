@@ -1,0 +1,28 @@
+.telemetry-card { display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden; border: 1px solid #274b61; border-left-width: 6px; border-radius: 16px; background: #f7fbfd; color: #15242e; box-shadow: 0 10px 24px rgba(8, 24, 34, .16); font-family: Inter, ui-sans-serif, system-ui, sans-serif; pointer-events: all; user-select: none; }
+.theme-dark .telemetry-card { background: #17232b; color: #edf7fb; border-color: #496d7d; }
+.telemetry-card-fresh { border-left-color: #1f9d63; }
+.telemetry-card-stale { border-left-color: #d49a14; }
+.telemetry-card-offline { border-left-color: #c8483a; }
+.telemetry-card-loading { border-left-color: #7b8f99; }
+.telemetry-kicker { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 16px 0; color: #46758a; font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.theme-dark .telemetry-kicker { color: #91c7db; }
+.telemetry-simulated { border: 1px dashed currentColor; border-radius: 999px; padding: 1px 7px; font-size: 10px; letter-spacing: .06em; }
+.telemetry-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 5px 16px 2px; }
+.telemetry-heading strong { font-size: 18px; line-height: 1.25; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.telemetry-badge { display: inline-flex; align-items: center; white-space: nowrap; border-radius: 999px; padding: 5px 10px; background: #e5edf1; color: #3b5867; font-size: 11px; font-weight: 800; }
+.telemetry-badge-fresh { background: #d7f1e3; color: #16603d; }
+.telemetry-badge-stale { background: #fbebc0; color: #7a5200; }
+.telemetry-badge-offline { background: #f8ddd8; color: #8a3025; }
+.theme-dark .telemetry-badge-fresh { background: #174a31; color: #bff0d6; }
+.theme-dark .telemetry-badge-stale { background: #5a4207; color: #fbe3a0; }
+.theme-dark .telemetry-badge-offline { background: #5c231c; color: #f9cdc6; }
+.telemetry-reason { padding: 0 16px 8px; color: #5d737f; font-size: 12px; }
+.theme-dark .telemetry-reason { color: #a8c0ca; }
+.telemetry-readings { flex: 1 1 auto; min-height: 0; overflow: hidden; margin: 0; padding: 0 16px; display: grid; gap: 4px; align-content: start; }
+.telemetry-readings > div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid rgba(100, 130, 145, .25); padding: 3px 0; font-size: 13px; }
+.telemetry-readings dt { color: #5d737f; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-dark .telemetry-readings dt { color: #a8c0ca; }
+.telemetry-readings dd { margin: 0; font-weight: 750; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.telemetry-empty { flex: 1 1 auto; display: grid; place-items: center; color: #7b8f99; font-size: 12px; }
+.telemetry-footer { flex: none; padding: 9px 16px 13px; color: #5d737f; font-size: 11px; }
+.theme-dark .telemetry-footer { color: #a8c0ca; }
